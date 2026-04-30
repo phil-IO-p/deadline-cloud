@@ -13,13 +13,24 @@ When using `deadline bundle gui-submit --browse` or the "Load a different job bu
 
 Replace the native folder picker with a custom job bundle browser dialog that:
 
-1. Provides a navigable directory tree showing only folders and job bundles.
+1. Provides a navigable directory tree showing only folders, archives, and job bundles.
 2. Displays a preview panel with bundle metadata when a job bundle is selected.
 3. Supports both local filesystem and S3 bucket browsing through a common backend abstraction.
-4. For S3, uses the selected queue's job attachment bucket with a `job-bundles/` prefix — no extra configuration needed.
-5. Respects a configurable default local browse directory.
+4. Supports job bundles as directories or archives (`.zip`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tar.xz`, `.tar`).
+5. For S3, uses the selected queue's job attachment bucket with a `job-bundles/` prefix — no extra configuration needed.
+6. Caches S3 archive bundles locally with ETag validation for fast repeated access.
+7. Respects a configurable default local browse directory.
 
 ## Design
+
+### Bundle Formats
+
+Job bundles can be either:
+
+- **Directories** — a folder containing `template.yaml` or `template.json` at the root, plus any scripts, data files, and `asset_references.yaml`.
+- **Archives** — a `.zip`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tar.xz`, or `.tar` file containing a job bundle. The template can be at the archive root or inside a single wrapper directory.
+
+Both formats are supported for both local and S3 browsing. Archives are extracted to a local directory before submission.
 
 ### Backend Abstraction
 
@@ -29,7 +40,7 @@ To support both local and S3 browsing without coupling the UI to either, introdu
 @dataclass
 class BundleInfo:
     """Metadata extracted from a job bundle's template."""
-    path: str              # Local path or s3:// URI
+    path: str              # Local path, archive path, or s3:// URI
     name: str              # From template "name" field
     description: str       # From template "description" field, or ""
     step_names: list[str]  # Names of each step in the template
@@ -38,13 +49,14 @@ class BundleInfo:
 @dataclass
 class BrowseEntry:
     """A single item in the browser listing."""
-    name: str              # Display name (folder basename or bundle name)
+    name: str              # Display name (folder basename or archive name without extension)
     path: str              # Full path or S3 URI
     is_bundle: bool        # True if this is a valid job bundle
+    is_archive: bool       # True if this is an archive file
 
 class BundleRepository(Protocol):
     def list_entries(self, path: str) -> list[BrowseEntry]:
-        """List immediate children of `path`. Returns folders and bundles."""
+        """List immediate children of `path`. Returns folders, archives, and bundles."""
         ...
 
     def get_bundle_info(self, path: str) -> Optional[BundleInfo]:
@@ -58,8 +70,8 @@ class BundleRepository(Protocol):
 
 Two implementations:
 
-- `LocalBundleRepository` — walks the local filesystem. A directory is a bundle if it contains `template.yaml` or `template.json`. Uses the existing `read_yaml_or_json_object` loader.
-- `S3BundleRepository` — lists objects under the queue's job attachment bucket at `{rootPrefix}/job-bundles/`. Constructed from the queue's `JobAttachmentS3Settings`.
+- `LocalBundleRepository` — walks the local filesystem. Lists directories and archive files. Directories are bundles if they contain `template.yaml`/`template.json`. Archives are always shown as bundles (validated on preview). Provides `extract_bundle()` for extracting archives to a local directory.
+- `S3BundleRepository` — lists objects and prefixes under the queue's job attachment bucket at `{rootPrefix}/job-bundles/`. Folder prefixes and archive objects are both listed. Provides `resolve_bundle()` which handles both folder downloads and archive download+cache+extract.
 
 ### S3 Bucket Convention
 
@@ -73,28 +85,54 @@ Where `s3BucketName` and `rootPrefix` come from the selected queue's `jobAttachm
 
 - No extra configuration is needed — the bucket is derived from the queue the user already has selected.
 - Users (or admins) place job bundles in the `job-bundles/` folder within the queue's attachment bucket.
-- Each bundle is an S3 "folder" (common prefix) containing a `template.yaml` or `template.json`.
+- Bundles can be either folders (common prefixes containing a template) or archive files.
 
 Example S3 layout:
 ```
 s3://my-farm-bucket/DeadlineCloud/job-bundles/
-    blender-render/
-        template.yaml
-    maya-arnold/
-        template.yaml
-        asset_references.yaml
+    blender-render.zip
+    maya-arnold.tar.gz
     simple-job/
-        template.json
+        template.yaml
+    data-processing/
+        template.yaml
+        scripts/
+            process.py
 ```
+
+### S3 Archive Caching
+
+Archive bundles from S3 are cached locally to avoid re-downloading on repeated use.
+
+**Cache location**: `~/.deadline/cache/job-bundles/{hash}/{bundle-name}/`
+
+Where `{hash}` is a truncated SHA-256 of `{bucket}/{s3-key}` to ensure uniqueness.
+
+**Cache validation**: On each access, a single `head_object` call retrieves the archive's ETag. If it matches the cached ETag, the local copy is used directly. If it differs (or no cache exists), the archive is re-downloaded and re-extracted.
+
+**Cache metadata** (`.bundle_cache_meta.json`):
+```json
+{
+  "etag": "\"d41d8cd98f00b204e9800998ecf8427e\"",
+  "last_modified": "2026-04-30T12:00:00+00:00"
+}
+```
+
+**Why only archives are cached**: An archive is a single S3 object with a single ETag — one `head_object` validates the entire bundle. Folder-based bundles are multiple objects with no single version identifier, so staleness detection would require checking every file. Folder bundles are downloaded to temp directories with atexit cleanup instead.
 
 ### Detection: What Is a Job Bundle?
 
-A directory (local) or prefix (S3) is a job bundle if it contains a `template.yaml` or `template.json`.
+- **Directories** (local or S3 prefix): contains `template.yaml` or `template.json`.
+- **Archives** (local file or S3 object): filename ends with a supported archive extension. Validated by reading the template from inside the archive on preview.
 
-For `list_entries`, we need to check each child directory/prefix. To keep this fast:
+For `list_entries`, detection is kept fast:
 
-- **Local**: For each child directory, check for the existence of `template.yaml` or `template.json` (stat calls only — don't parse yet). Parse only happens in `get_bundle_info` when the user selects a bundle.
-- **S3**: Use `list_objects_v2` with the child prefix to check for `template.yaml`/`template.json` keys. Full parsing happens on selection.
+- **Local directories**: stat check for template file existence (no parsing).
+- **Local archives**: matched by file extension only.
+- **S3 prefixes**: `head_object` for template file existence.
+- **S3 archives**: matched by key extension only.
+
+Full template parsing happens only in `get_bundle_info` when the user selects a bundle for preview.
 
 ### Browser Dialog UI
 
@@ -103,10 +141,10 @@ For `list_entries`, we need to check each child directory/prefix. To keep this f
 │  Job Bundle Browser                                         │
 ├────────────────────────────────┬────────────────────────────┤
 │  📁 my-bundles/               │  Name: Blender Render      │
-│    📦 blender-render/         │  Description: Renders a    │
-│    📦 maya-arnold/            │  Blender scene file...     │
+│    📦 blender-render          │  Description: Renders a    │
+│    📦 maya-arnold             │  Blender scene file...     │
 │    📁 wip/                    │                            │
-│      📦 experimental-job/     │  Steps:                    │
+│      📦 experimental-job      │  Steps:                    │
 │    📦 simple-job/             │    • RenderBlender         │
 │                               │                            │
 │                               │  Parameters:               │
@@ -123,10 +161,10 @@ For `list_entries`, we need to check each child directory/prefix. To keep this f
 ```
 
 **Left panel** — Navigable tree view:
-- Shows folders (📁) and job bundles (📦) with distinct icons.
+- Shows folders (📁) and job bundles (📦) with distinct icons. Both directory bundles and archive bundles use the 📦 icon.
 - Folders can be expanded/navigated into.
 - Job bundles are leaf nodes (selectable, not expandable).
-- Non-bundle, non-directory files are hidden.
+- Non-bundle, non-archive files are hidden.
 
 **Right panel** — Preview (shown when a bundle is selected):
 - **Name**: From the template's `name` field.
@@ -164,31 +202,87 @@ Environment variable override: `DEADLINE_JOB_BUNDLE_DEFAULT_DIRECTORY`
 
 The `--browse` flag on `deadline bundle gui-submit` opens this new dialog instead of `QFileDialog.getExistingDirectory()`. No new flags needed.
 
-For S3 bundles, the submission flow downloads the bundle to a temporary local directory before submission. This is handled in `show_job_bundle_submitter` after the dialog returns.
+The "Load a different job bundle" button inside the submitter dialog (`JobBundleSettingsWidget.on_load_bundle`) also uses the new browser dialog, giving users the same browsing experience when switching bundles mid-session.
+
+### Bundle Resolution Flow
+
+After the user selects a bundle in the browser, it must be resolved to a local directory for the existing submission pipeline:
+
+| Source | Format | Resolution | Cleanup |
+|---|---|---|---|
+| Local | Directory | Used directly (no copy) | None needed |
+| Local | Archive | Extracted to temp dir | atexit cleanup |
+| S3 | Directory (folder) | Downloaded to temp dir | atexit cleanup |
+| S3 | Archive | Downloaded, cached with ETag, extracted to cache dir | Persists in cache |
+
+Once resolved to a local directory, the standard submission flow takes over: `read_job_bundle_parameters()` parses the template and resolves relative PATH defaults against the bundle directory, `apply_job_parameters()` processes asset references, and the job is submitted normally.
+
+Bundled assets (scripts, data files) with relative paths resolve correctly against the extracted/downloaded directory because the existing path resolution logic operates on the `bundle_dir` path regardless of its origin.
 
 ### Changes to Existing Code
 
 | File | Change |
 |---|---|
 | `config/config_file.py` | Add `settings.job_bundle_default_directory` to `SETTINGS` |
+| `cli/_groups/bundle_group.py` | Add `deadline bundle upload` and `deadline bundle download` commands |
 | `ui/dialogs/job_bundle_browser_dialog.py` | **New file.** The browser dialog. |
 | `ui/widgets/job_bundle_settings_tab.py` | `on_load_bundle` opens the new browser dialog instead of `QFileDialog` |
-| `ui/job_bundle_submitter.py` | `show_job_bundle_submitter` uses the new browser dialog when `browse=True` |
+| `ui/job_bundle_submitter.py` | `show_job_bundle_submitter` uses the new browser dialog when `browse=True`; handles archive extraction and S3 resolution |
 | `job_bundle/loader.py` | Add `is_job_bundle_dir(path) -> bool` helper for quick detection |
-| `job_bundle/repository.py` | **New file.** `BundleRepository` protocol, `LocalBundleRepository`, `S3BundleRepository` |
+| `job_bundle/repository.py` | **New file.** `BundleRepository` protocol, `LocalBundleRepository`, `S3BundleRepository`, archive helpers, cache management |
+
+### CLI Commands
+
+#### `deadline bundle upload <job_bundle_dir>`
+
+Uploads a local job bundle to the queue's S3 `job-bundles/` folder.
+
+- **Default behavior**: Archives the bundle as a zip and uploads a single object (e.g. `blender-render.zip`).
+- `--format tar.gz`: Use tar.gz instead of zip.
+- `--no-archive`: Upload as loose files (folder-based bundle) instead of an archive.
+- `--name`: Override the bundle name in S3 (defaults to the directory name).
+- `--profile`, `--farm-id`, `--queue-id`: Standard config overrides.
+
+```
+$ deadline bundle upload ./my-render-job
+Uploaded bundle to s3://my-farm-bucket/DeadlineCloud/job-bundles/my-render-job.zip
+
+$ deadline bundle upload ./my-render-job --format tar.gz --name custom-name
+Uploaded bundle to s3://my-farm-bucket/DeadlineCloud/job-bundles/custom-name.tar.gz
+
+$ deadline bundle upload ./my-render-job --no-archive
+Uploaded 5 files to s3://my-farm-bucket/DeadlineCloud/job-bundles/my-render-job/
+```
+
+#### `deadline bundle download <bundle_name>`
+
+Downloads a job bundle from the queue's S3 `job-bundles/` folder.
+
+- Looks for both archive and folder formats by name.
+- Archive bundles use the ETag cache (same as the browser dialog) — repeated downloads are instant if the archive hasn't changed.
+- `-o, --output-dir`: Local directory to extract/download to (defaults to `.`).
+- `--profile`, `--farm-id`, `--queue-id`: Standard config overrides.
+
+```
+$ deadline bundle download blender-render
+Downloaded bundle to: ./blender-render
+
+$ deadline bundle download blender-render -o /tmp/bundles
+Downloaded bundle to: /tmp/bundles/blender-render
+```
 
 ### S3 Considerations
 
-- **Authentication**: S3 browsing uses the same boto3 session/profile as the rest of deadline-cloud. No separate auth flow.
-- **Permissions**: Requires `s3:ListBucket` and `s3:GetObject` on the queue's attachment bucket. If access is denied, show an error in the dialog rather than crashing.
-- **Performance**: Each directory expansion is one `list_objects_v2` call. Bundle detection adds one `list_objects_v2` per child prefix. Acceptable for typical bundle repositories (tens of bundles, not thousands).
-- **Template download**: `get_bundle_info` for S3 downloads only the `template.yaml`/`template.json` file (typically <10KB) to parse metadata.
-- **Bundle selection**: When the user selects an S3 bundle, the full bundle directory is downloaded to a temp directory for submission. This happens after the dialog closes, not during browsing.
+- **Authentication**: S3 browsing and CLI commands use the same boto3 session/profile as the rest of deadline-cloud. No separate auth flow.
+- **Permissions**: Requires `s3:ListBucket` and `s3:GetObject` on the queue's attachment bucket for browsing/download. Upload additionally requires `s3:PutObject`. If access is denied, show an error rather than crashing.
+- **Performance**: Each directory expansion is one `list_objects_v2` call. Folder bundle detection adds one `head_object` per child prefix. Archive bundles are detected by extension (no API call). Cached archives validate with one `head_object`.
+- **Template preview**: For S3 archives, the full archive is downloaded to parse the template (archives are typically small). For S3 folders, only the template file is fetched. Cached archives read the template from the local cache.
+- **Bundled assets**: Scripts, data files, and other assets within the bundle are included in the archive or folder download. Relative PATH parameters resolve against the extracted/downloaded copy.
 
 ## Out of Scope (Future)
 
-- Caching/indexing of bundle metadata for faster repeated browsing.
 - Search/filter within the browser.
 - Favoriting or pinning frequently used bundles.
 - Browsing bundles from a Deadline Cloud service API (e.g. farm-level bundle registry).
 - Configurable S3 bucket/prefix (currently always derived from the queue).
+- Cache size limits or TTL-based eviction.

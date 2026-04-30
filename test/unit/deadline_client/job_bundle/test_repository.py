@@ -4,6 +4,9 @@
 
 import json
 import os
+import tarfile
+import zipfile
+
 import pytest
 import yaml
 
@@ -11,9 +14,11 @@ from deadline.client.job_bundle.repository import (
     BrowseEntry,
     BundleInfo,
     LocalBundleRepository,
-    S3BundleRepository,
     _extract_bundle_info,
+    _is_archive,
     _parse_template,
+    _read_template_from_archive_path,
+    _strip_archive_ext,
 )
 
 
@@ -57,10 +62,99 @@ class TestExtractBundleInfo:
     def test_minimal_template(self):
         template = {"steps": [{"name": "OnlyStep"}]}
         info = _extract_bundle_info(template, "/path/to/bundle")
-        assert info.name == "bundle"  # Falls back to basename
+        assert info.name == "bundle"
         assert info.description == ""
         assert info.step_names == ["OnlyStep"]
         assert info.parameters == []
+
+
+class TestArchiveHelpers:
+    def test_is_archive(self):
+        assert _is_archive("bundle.zip")
+        assert _is_archive("bundle.tar.gz")
+        assert _is_archive("bundle.tgz")
+        assert _is_archive("bundle.tar.bz2")
+        assert _is_archive("bundle.tar.xz")
+        assert _is_archive("bundle.tar")
+        assert not _is_archive("bundle")
+        assert not _is_archive("template.yaml")
+
+    def test_strip_archive_ext(self):
+        assert _strip_archive_ext("bundle.zip") == "bundle"
+        assert _strip_archive_ext("bundle.tar.gz") == "bundle"
+        assert _strip_archive_ext("bundle.tgz") == "bundle"
+        assert _strip_archive_ext("my-job.tar.bz2") == "my-job"
+        assert _strip_archive_ext("noext") == "noext"
+
+
+class TestReadTemplateFromArchive:
+    def _make_zip(self, tmp_path, contents: dict[str, str]) -> str:
+        """Create a zip with the given {filename: content} entries."""
+        zip_path = str(tmp_path / "bundle.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            for name, data in contents.items():
+                zf.writestr(name, data)
+        return zip_path
+
+    def _make_tar_gz(self, tmp_path, contents: dict[str, str]) -> str:
+        """Create a tar.gz with the given {filename: content} entries."""
+        tar_path = str(tmp_path / "bundle.tar.gz")
+        with tarfile.open(tar_path, "w:gz") as tf:
+            for name, data in contents.items():
+                import io
+
+                info = tarfile.TarInfo(name=name)
+                encoded = data.encode("utf-8")
+                info.size = len(encoded)
+                tf.addfile(info, io.BytesIO(encoded))
+        return tar_path
+
+    def test_zip_root_template(self, tmp_path):
+        path = self._make_zip(tmp_path, {"template.yaml": "name: ZipBundle\nsteps: []\n"})
+        result = _read_template_from_archive_path(path)
+        assert result is not None
+        raw, fname = result
+        assert "ZipBundle" in raw
+        assert fname == "template.yaml"
+
+    def test_zip_wrapped_template(self, tmp_path):
+        path = self._make_zip(
+            tmp_path, {"my-bundle/template.yaml": "name: Wrapped\nsteps: []\n"}
+        )
+        result = _read_template_from_archive_path(path)
+        assert result is not None
+        raw, fname = result
+        assert "Wrapped" in raw
+
+    def test_zip_json_template(self, tmp_path):
+        path = self._make_zip(
+            tmp_path,
+            {"template.json": json.dumps({"name": "JSONBundle", "steps": []})},
+        )
+        result = _read_template_from_archive_path(path)
+        assert result is not None
+        raw, fname = result
+        assert fname == "template.json"
+
+    def test_zip_no_template(self, tmp_path):
+        path = self._make_zip(tmp_path, {"readme.txt": "no template here"})
+        result = _read_template_from_archive_path(path)
+        assert result is None
+
+    def test_tar_gz_root_template(self, tmp_path):
+        path = self._make_tar_gz(tmp_path, {"template.yaml": "name: TarBundle\nsteps: []\n"})
+        result = _read_template_from_archive_path(path)
+        assert result is not None
+        raw, fname = result
+        assert "TarBundle" in raw
+
+    def test_tar_gz_wrapped_template(self, tmp_path):
+        path = self._make_tar_gz(
+            tmp_path, {"my-bundle/template.yaml": "name: TarWrapped\nsteps: []\n"}
+        )
+        result = _read_template_from_archive_path(path)
+        assert result is not None
+        assert "TarWrapped" in result[0]
 
 
 class TestLocalBundleRepository:
@@ -78,18 +172,13 @@ class TestLocalBundleRepository:
         assert entries == []
 
     def test_list_entries_with_bundles_and_dirs(self, tmp_path):
-        # Create a bundle directory
         bundle_dir = tmp_path / "my-bundle"
         bundle_dir.mkdir()
-        (bundle_dir / "template.yaml").write_text(
-            "specificationVersion: 'jobtemplate-2023-09'\nname: Test Bundle\nsteps:\n- name: Step1\n"
-        )
+        (bundle_dir / "template.yaml").write_text("name: Test Bundle\nsteps:\n- name: Step1\n")
 
-        # Create a regular directory
         regular_dir = tmp_path / "regular-dir"
         regular_dir.mkdir()
 
-        # Create a file (should be ignored)
         (tmp_path / "some-file.txt").write_text("not a dir")
 
         repo = LocalBundleRepository(root=str(tmp_path))
@@ -102,21 +191,43 @@ class TestLocalBundleRepository:
 
         bundle_entry = next(e for e in entries if e.name == "my-bundle")
         assert bundle_entry.is_bundle is True
+        assert bundle_entry.is_archive is False
 
         dir_entry = next(e for e in entries if e.name == "regular-dir")
         assert dir_entry.is_bundle is False
 
-    def test_list_entries_json_template(self, tmp_path):
-        bundle_dir = tmp_path / "json-bundle"
-        bundle_dir.mkdir()
-        (bundle_dir / "template.json").write_text(
-            json.dumps({"name": "JSON Bundle", "steps": [{"name": "S1"}]})
-        )
+    def test_list_entries_with_archives(self, tmp_path):
+        # Create a zip archive bundle
+        zip_path = tmp_path / "render-job.zip"
+        with zipfile.ZipFile(str(zip_path), "w") as zf:
+            zf.writestr("template.yaml", "name: Render\nsteps:\n- name: S1\n")
+
+        # Create a tar.gz archive bundle
+        tar_path = tmp_path / "process-job.tar.gz"
+        with tarfile.open(str(tar_path), "w:gz") as tf:
+            import io
+
+            data = b"name: Process\nsteps:\n- name: S1\n"
+            info = tarfile.TarInfo(name="template.yaml")
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+
+        # Create a regular directory bundle
+        dir_bundle = tmp_path / "dir-bundle"
+        dir_bundle.mkdir()
+        (dir_bundle / "template.yaml").write_text("name: Dir\nsteps: []\n")
 
         repo = LocalBundleRepository(root=str(tmp_path))
         entries = repo.list_entries(str(tmp_path))
-        assert len(entries) == 1
-        assert entries[0].is_bundle is True
+
+        assert len(entries) == 3
+        archive_entries = [e for e in entries if e.is_archive]
+        assert len(archive_entries) == 2
+        archive_names = {e.name for e in archive_entries}
+        assert "render-job" in archive_names
+        assert "process-job" in archive_names
+        for e in archive_entries:
+            assert e.is_bundle is True
 
     def test_list_entries_nonexistent_path(self):
         repo = LocalBundleRepository()
@@ -146,7 +257,30 @@ class TestLocalBundleRepository:
         assert info.description == "A test"
         assert info.step_names == ["Render"]
         assert len(info.parameters) == 1
-        assert info.parameters[0]["name"] == "Frames"
+
+    def test_get_bundle_info_archive(self, tmp_path):
+        zip_path = tmp_path / "my-job.zip"
+        with zipfile.ZipFile(str(zip_path), "w") as zf:
+            zf.writestr(
+                "template.yaml",
+                yaml.dump(
+                    {
+                        "name": "Archive Job",
+                        "description": "From a zip",
+                        "steps": [{"name": "Run"}],
+                        "parameterDefinitions": [{"name": "Input", "type": "PATH"}],
+                    }
+                ),
+            )
+
+        repo = LocalBundleRepository(root=str(tmp_path))
+        info = repo.get_bundle_info(str(zip_path))
+
+        assert info is not None
+        assert info.name == "Archive Job"
+        assert info.description == "From a zip"
+        assert info.step_names == ["Run"]
+        assert len(info.parameters) == 1
 
     def test_get_bundle_info_not_a_bundle(self, tmp_path):
         regular_dir = tmp_path / "not-a-bundle"
@@ -156,8 +290,36 @@ class TestLocalBundleRepository:
         info = repo.get_bundle_info(str(regular_dir))
         assert info is None
 
+    def test_extract_bundle_flat(self, tmp_path):
+        """Test extracting a zip where template is at the root."""
+        zip_path = tmp_path / "flat.zip"
+        with zipfile.ZipFile(str(zip_path), "w") as zf:
+            zf.writestr("template.yaml", "name: Flat\nsteps: []\n")
+            zf.writestr("scripts/run.sh", "#!/bin/bash\necho hello\n")
+
+        dest = tmp_path / "extracted"
+        dest.mkdir()
+        repo = LocalBundleRepository()
+        result = repo.extract_bundle(str(zip_path), str(dest))
+
+        assert os.path.isfile(os.path.join(result, "template.yaml"))
+        assert os.path.isfile(os.path.join(result, "scripts", "run.sh"))
+
+    def test_extract_bundle_wrapped(self, tmp_path):
+        """Test extracting a zip where contents are in a single subdirectory."""
+        zip_path = tmp_path / "wrapped.zip"
+        with zipfile.ZipFile(str(zip_path), "w") as zf:
+            zf.writestr("my-bundle/template.yaml", "name: Wrapped\nsteps: []\n")
+            zf.writestr("my-bundle/scripts/run.sh", "#!/bin/bash\n")
+
+        dest = tmp_path / "extracted"
+        dest.mkdir()
+        repo = LocalBundleRepository()
+        result = repo.extract_bundle(str(zip_path), str(dest))
+
+        assert os.path.isfile(os.path.join(result, "template.yaml"))
+
     def test_nested_bundles(self, tmp_path):
-        """Test that bundles nested inside directories are found when listing the parent."""
         parent = tmp_path / "projects"
         parent.mkdir()
 

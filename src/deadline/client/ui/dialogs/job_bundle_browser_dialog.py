@@ -43,6 +43,7 @@ logger = getLogger(__name__)
 ROLE_PATH = Qt.UserRole + 1
 ROLE_IS_BUNDLE = Qt.UserRole + 2
 ROLE_LOADED = Qt.UserRole + 3
+ROLE_IS_ARCHIVE = Qt.UserRole + 4
 
 
 class JobBundleBrowserDialog(QDialog):
@@ -81,6 +82,7 @@ class JobBundleBrowserDialog(QDialog):
         self._current_repo: BundleRepository = self._local_repo
         self._selected_path: Optional[str] = None
         self._selected_is_s3 = False
+        self._selected_is_archive = False
 
         self._build_ui()
         self._populate_root()
@@ -92,6 +94,10 @@ class JobBundleBrowserDialog(QDialog):
     @property
     def selected_is_s3(self) -> bool:
         return self._selected_is_s3
+
+    @property
+    def selected_is_archive(self) -> bool:
+        return self._selected_is_archive
 
     @property
     def s3_repo(self) -> Optional[S3BundleRepository]:
@@ -208,6 +214,7 @@ class JobBundleBrowserDialog(QDialog):
         item.setData(entry.path, ROLE_PATH)
         item.setData(entry.is_bundle, ROLE_IS_BUNDLE)
         item.setData(False, ROLE_LOADED)
+        item.setData(entry.is_archive, ROLE_IS_ARCHIVE)
         if not entry.is_bundle:
             # Add a placeholder child so the expand arrow shows
             placeholder = QStandardItem()
@@ -254,11 +261,13 @@ class JobBundleBrowserDialog(QDialog):
         if is_bundle:
             self._selected_path = path
             self._selected_is_s3 = not self._radio_local.isChecked()
+            self._selected_is_archive = bool(item.data(ROLE_IS_ARCHIVE))
             self._select_button.setEnabled(True)
             self._load_preview(path)
         else:
             self._selected_path = None
             self._select_button.setEnabled(False)
+            self._selected_is_archive = False
             self._clear_preview()
 
     def _on_source_changed(self, checked: bool):

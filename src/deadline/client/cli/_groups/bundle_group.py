@@ -523,3 +523,167 @@ def _print_response(
             click.echo(f"Job ID: {job_id}")
         else:
             click.echo("Job submission canceled.")
+
+
+def _get_queue_s3_settings(config):
+    """Get the queue's job attachment S3 settings from config."""
+    from ....job_attachments._aws.deadline import get_queue
+
+    farm_id = config_file.get_setting("defaults.farm_id", config=config)
+    queue_id = config_file.get_setting("defaults.queue_id", config=config)
+    if not farm_id or not queue_id:
+        raise DeadlineOperationError(
+            "A default farm and queue must be configured. Run 'deadline config set defaults.farm_id <id>' and 'deadline config set defaults.queue_id <id>'."
+        )
+    queue = get_queue(farm_id=farm_id, queue_id=queue_id)
+    if not queue.jobAttachmentSettings:
+        raise DeadlineOperationError(
+            f"Queue {queue_id} does not have job attachment settings configured."
+        )
+    return queue.jobAttachmentSettings
+
+
+@cli_bundle.command(name="upload")
+@click.argument("job_bundle_dir")
+@click.option("--profile", help="The AWS profile to use.")
+@click.option("--farm-id", help="The farm to use.")
+@click.option("--queue-id", help="The queue to use.")
+@click.option(
+    "--name",
+    help="Name for the archive in S3. Defaults to the bundle directory name.",
+)
+@click.option(
+    "--format",
+    "archive_format",
+    type=click.Choice(["zip", "tar.gz"], case_sensitive=False),
+    default="zip",
+    help="Archive format to upload as.",
+)
+@click.option(
+    "--no-archive",
+    is_flag=True,
+    help="Upload as a folder (loose files) instead of an archive.",
+)
+@_handle_error
+def bundle_upload(job_bundle_dir, name, archive_format, no_archive, **args):
+    """
+    Upload a job bundle to the queue's S3 job-bundles folder.
+
+    By default, the bundle is archived as a zip before uploading.
+    Use --no-archive to upload as loose files instead.
+    """
+    import zipfile
+    import tarfile
+    import io
+
+    from ...job_bundle.loader import is_job_bundle_dir
+    from ...job_bundle.repository import S3_JOB_BUNDLES_PREFIX
+
+    config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
+    s3_settings = _get_queue_s3_settings(config)
+
+    job_bundle_dir = os.path.abspath(job_bundle_dir)
+    if not is_job_bundle_dir(job_bundle_dir):
+        raise DeadlineOperationError(
+            f"Directory does not appear to be a job bundle (no template.yaml or template.json): {job_bundle_dir}"
+        )
+
+    bundle_name = name or os.path.basename(job_bundle_dir)
+    prefix = f"{s3_settings.rootPrefix.rstrip('/')}/{S3_JOB_BUNDLES_PREFIX}"
+
+    import boto3
+
+    s3 = boto3.client("s3")
+
+    if no_archive:
+        # Upload as loose files
+        s3_prefix = f"{prefix}/{bundle_name}/"
+        file_count = 0
+        for root, _dirs, files in os.walk(job_bundle_dir):
+            for fname in files:
+                local_path = os.path.join(root, fname)
+                rel_path = os.path.relpath(local_path, job_bundle_dir)
+                s3_key = f"{s3_prefix}{rel_path}"
+                s3.upload_file(local_path, s3_settings.s3BucketName, s3_key)
+                file_count += 1
+        click.echo(
+            f"Uploaded {file_count} files to s3://{s3_settings.s3BucketName}/{s3_prefix}"
+        )
+    else:
+        # Archive and upload
+        buf = io.BytesIO()
+        if archive_format == "zip":
+            ext = ".zip"
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for root, _dirs, files in os.walk(job_bundle_dir):
+                    for fname in files:
+                        local_path = os.path.join(root, fname)
+                        arcname = os.path.relpath(local_path, job_bundle_dir)
+                        zf.write(local_path, arcname)
+        else:
+            ext = ".tar.gz"
+            with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+                for root, _dirs, files in os.walk(job_bundle_dir):
+                    for fname in files:
+                        local_path = os.path.join(root, fname)
+                        arcname = os.path.relpath(local_path, job_bundle_dir)
+                        tf.add(local_path, arcname)
+
+        s3_key = f"{prefix}/{bundle_name}{ext}"
+        buf.seek(0)
+        s3.upload_fileobj(buf, s3_settings.s3BucketName, s3_key)
+        click.echo(f"Uploaded bundle to s3://{s3_settings.s3BucketName}/{s3_key}")
+
+
+@cli_bundle.command(name="download")
+@click.argument("bundle_name")
+@click.option("--profile", help="The AWS profile to use.")
+@click.option("--farm-id", help="The farm to use.")
+@click.option("--queue-id", help="The queue to use.")
+@click.option(
+    "-o",
+    "--output-dir",
+    default=".",
+    help="Local directory to download the bundle to. Defaults to current directory.",
+)
+@_handle_error
+def bundle_download(bundle_name, output_dir, **args):
+    """
+    Download a job bundle from the queue's S3 job-bundles folder.
+
+    BUNDLE_NAME is the name of the bundle (e.g. 'blender-render').
+    The command will look for both archive and folder formats.
+    """
+    from ...job_bundle.repository import (
+        S3BundleRepository,
+        ARCHIVE_EXTENSIONS,
+    )
+
+    config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
+    s3_settings = _get_queue_s3_settings(config)
+
+    repo = S3BundleRepository(
+        bucket_name=s3_settings.s3BucketName,
+        root_prefix=s3_settings.rootPrefix,
+    )
+
+    output_dir = os.path.abspath(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    # List entries to find the bundle by name
+    entries = repo.list_entries(repo.root_path())
+    match = None
+    for entry in entries:
+        if entry.name == bundle_name:
+            match = entry
+            break
+
+    if not match:
+        available = [e.name for e in entries if e.is_bundle]
+        msg = f"Bundle '{bundle_name}' not found in s3://{s3_settings.s3BucketName}/{repo._prefix}"
+        if available:
+            msg += f"\nAvailable bundles: {', '.join(available)}"
+        raise DeadlineOperationError(msg)
+
+    local_path = repo.resolve_bundle(match.path, output_dir)
+    click.echo(f"Downloaded bundle to: {local_path}")

@@ -249,11 +249,31 @@ def show_job_bundle_submitter(
             return None
 
         if browser.selected_is_s3 and browser.s3_repo:
-            # Download the S3 bundle to a temp directory
+            if browser.selected_is_archive:
+                # Archive bundles are cached locally with ETag validation
+                input_job_bundle_dir = browser.s3_repo.resolve_bundle(
+                    browser.selected_path, ""
+                )
+            else:
+                # Folder bundles are downloaded to a temp directory
+                import tempfile
+                import atexit
+                import shutil
+
+                temp_dir = tempfile.mkdtemp(prefix="deadline-bundle-")
+                atexit.register(shutil.rmtree, temp_dir, True)
+                input_job_bundle_dir = browser.s3_repo.resolve_bundle(
+                    browser.selected_path, temp_dir
+                )
+        elif browser.selected_is_archive:
+            # Local archive — extract to temp dir
             import tempfile
+            import atexit
+            import shutil
 
             temp_dir = tempfile.mkdtemp(prefix="deadline-bundle-")
-            input_job_bundle_dir = browser.s3_repo.download_bundle(
+            atexit.register(shutil.rmtree, temp_dir, True)
+            input_job_bundle_dir = browser._local_repo.extract_bundle(
                 browser.selected_path, temp_dir
             )
         else:
