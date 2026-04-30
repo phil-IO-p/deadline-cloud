@@ -198,19 +198,19 @@ class LocalBundleRepository:
     def list_entries(self, path: str) -> list[BrowseEntry]:
         entries: list[BrowseEntry] = []
         try:
-            children = sorted(os.listdir(path))
+            with os.scandir(path) as it:
+                children = sorted(it, key=lambda e: e.name)
         except OSError:
             return entries
-        for name in children:
-            full = os.path.join(path, name)
-            if os.path.isdir(full):
-                is_bundle = self._is_dir_bundle(full)
-                entries.append(BrowseEntry(name=name, path=full, is_bundle=is_bundle))
-            elif _is_archive(name) and os.path.isfile(full):
+        for entry in children:
+            if entry.is_dir(follow_symlinks=False):
+                is_bundle = self._is_dir_bundle(entry.path)
+                entries.append(BrowseEntry(name=entry.name, path=entry.path, is_bundle=is_bundle))
+            elif entry.is_file(follow_symlinks=False) and _is_archive(entry.name):
                 entries.append(
                     BrowseEntry(
-                        name=_strip_archive_ext(name),
-                        path=full,
+                        name=_strip_archive_ext(entry.name),
+                        path=entry.path,
                         is_bundle=True,
                         is_archive=True,
                     )

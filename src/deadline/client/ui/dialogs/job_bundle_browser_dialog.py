@@ -10,7 +10,7 @@ from __future__ import annotations
 from logging import getLogger
 from typing import Optional
 
-from qtpy.QtCore import Qt, QModelIndex, Signal  # type: ignore
+from qtpy.QtCore import Qt, QModelIndex, QSortFilterProxyModel, QTimer, Signal  # type: ignore
 from qtpy.QtGui import QStandardItemModel, QStandardItem  # type: ignore
 from qtpy.QtWidgets import (  # type: ignore
     QDialog,
@@ -110,17 +110,35 @@ class JobBundleBrowserDialog(QDialog):
         splitter = QSplitter(Qt.Horizontal)
         layout.addWidget(splitter, stretch=1)
 
-        # Left: tree view
+        # Left: tree view with filter
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._filter_edit = QLineEdit()
+        self._filter_edit.setPlaceholderText("Filter bundles...")
+        self._filter_edit.setClearButtonEnabled(True)
+        self._filter_edit.textChanged.connect(self._on_filter_changed)
+        left_layout.addWidget(self._filter_edit)
+
         self._model = QStandardItemModel()
         self._model.setHorizontalHeaderLabels([tr("Name")])
+
+        self._proxy = QSortFilterProxyModel()
+        self._proxy.setSourceModel(self._model)
+        self._proxy.setRecursiveFilteringEnabled(True)
+        self._proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
+
         self._tree = QTreeView()
-        self._tree.setModel(self._model)
+        self._tree.setModel(self._proxy)
         self._tree.setHeaderHidden(True)
         self._tree.setEditTriggers(QTreeView.NoEditTriggers)
         self._tree.expanded.connect(self._on_expanded)
         self._tree.clicked.connect(self._on_clicked)
         self._tree.selectionModel().currentChanged.connect(self._on_selection_changed)
-        splitter.addWidget(self._tree)
+        left_layout.addWidget(self._tree)
+
+        splitter.addWidget(left_widget)
 
         # Right: preview panel in a scroll area
         preview_widget = QWidget()
@@ -230,8 +248,13 @@ class JobBundleBrowserDialog(QDialog):
 
     # ── Event Handlers ───────────────────────────────────────────
 
-    def _on_expanded(self, index: QModelIndex):
-        item = self._model.itemFromIndex(index)
+    def _source_item(self, proxy_index: QModelIndex):
+        """Map a proxy model index to the source model item."""
+        source_index = self._proxy.mapToSource(proxy_index)
+        return self._model.itemFromIndex(source_index)
+
+    def _on_expanded(self, proxy_index: QModelIndex):
+        item = self._source_item(proxy_index)
         if not item or item.data(ROLE_IS_BUNDLE) or item.data(ROLE_LOADED):
             return
         # Mark as loaded and replace placeholder with real children
@@ -242,14 +265,19 @@ class JobBundleBrowserDialog(QDialog):
         for entry in entries:
             self._add_entry_item(item, entry)
 
-    def _on_clicked(self, index: QModelIndex):
-        self._update_selection(index)
+    def _on_clicked(self, proxy_index: QModelIndex):
+        self._update_selection(proxy_index)
 
     def _on_selection_changed(self, current: QModelIndex, previous: QModelIndex):
         self._update_selection(current)
 
-    def _update_selection(self, index: QModelIndex):
-        item = self._model.itemFromIndex(index)
+    def _on_filter_changed(self, text: str):
+        self._proxy.setFilterFixedString(text)
+        if text:
+            self._tree.expandAll()
+
+    def _update_selection(self, proxy_index: QModelIndex):
+        item = self._source_item(proxy_index)
         if not item:
             self._clear_preview()
             self._select_button.setEnabled(False)
@@ -271,6 +299,38 @@ class JobBundleBrowserDialog(QDialog):
             self._select_button.setEnabled(False)
             self._selected_is_archive = False
             self._clear_preview()
+            # Auto-expand folders when clicked — clear filter first so children are visible
+            if self._filter_edit.text():
+                folder_path = item.data(ROLE_PATH)
+                self._filter_edit.clear()
+                # Defer select+expand to after Qt processes the filter change
+                QTimer.singleShot(0, lambda p=folder_path: self._select_and_expand_path(p))
+            else:
+                if not self._tree.isExpanded(proxy_index):
+                    self._tree.expand(proxy_index)
+
+    def _select_and_expand_path(self, path: str):
+        """Find an item by path in the proxy model, select it, and expand it."""
+        proxy_index = self._find_proxy_index_by_path(path)
+        if proxy_index and proxy_index.isValid():
+            self._tree.setCurrentIndex(proxy_index)
+            self._tree.expand(proxy_index)
+            self._tree.scrollTo(proxy_index, QTreeView.PositionAtTop)
+
+    def _find_proxy_index_by_path(self, path: str) -> Optional[QModelIndex]:
+        """Walk the source model to find an item by ROLE_PATH, return its proxy index."""
+
+        def _search(parent_item):
+            for row in range(parent_item.rowCount()):
+                child = parent_item.child(row)
+                if child and child.data(ROLE_PATH) == path:
+                    return self._proxy.mapFromSource(child.index())
+                result = _search(child)
+                if result:
+                    return result
+            return None
+
+        return _search(self._model.invisibleRootItem())
 
     def _on_source_changed(self, checked: bool):
         if self._radio_local.isChecked():

@@ -158,13 +158,13 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 ┌─────────────────────────────────────────────────────────────┐
 │  Job Bundle Browser                                         │
 ├────────────────────────────────┬────────────────────────────┤
-│  📁 my-bundles/               │  Name: Blender Render      │
-│    📦 blender-render          │  Description: Renders a    │
-│    📦 maya-arnold             │  Blender scene file...     │
-│    📁 wip/                    │                            │
-│      📦 experimental-job      │  Steps:                    │
-│    📦 simple-job/             │    • RenderBlender         │
-│                               │                            │
+│  [Filter bundles...         ]  │  Name: Blender Render      │
+│  📁 my-bundles/               │  Description: Renders a    │
+│    📦 blender-render          │  Blender scene file...     │
+│    📦 maya-arnold             │                            │
+│    📁 wip/                    │  Steps:                    │
+│      📦 experimental-job      │    • RenderBlender         │
+│    📦 simple-job/             │                            │
 │                               │  Parameters:               │
 │                               │    • BlenderSceneFile (PATH)│
 │                               │    • Frames (STRING)       │
@@ -178,13 +178,14 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Left panel** — Navigable tree view:
+**Left panel** — Filter and navigable tree view:
+- A text filter at the top that narrows the tree as you type. Case-insensitive, matches against entry names. Uses recursive filtering so parent folders remain visible when a child matches. The tree auto-expands when filtering to show results.
 - Shows folders (📁) and job bundles (📦) with distinct icons. Both directory bundles and archive bundles use the 📦 icon.
-- Folders can be expanded/navigated into.
+- Clicking a folder clears any active filter, expands the folder to show its children, and scrolls it to the top of the view. This makes the search-then-navigate flow natural: search for a folder, click it, see its contents.
 - Job bundles are leaf nodes (selectable, not expandable).
 - Non-bundle, non-archive files are hidden.
 
-**Right panel** — Preview (shown when a bundle is selected):
+**Right panel** — Preview (shown when a bundle is selected, scrollable):
 - **Name**: From the template's `name` field.
 - **Description**: From the template's `description` field, if present.
 - **Steps**: List of step names from the template.
@@ -302,7 +303,6 @@ Downloaded bundle to: /tmp/bundles/blender-render
 
 ## Out of Scope (Future)
 
-- Search/filter within the browser.
 - Favoriting or pinning frequently used bundles.
 - Browsing bundles from a Deadline Cloud service API (e.g. farm-level bundle registry).
 - Configurable S3 bucket/prefix (currently always derived from the queue).
