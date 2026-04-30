@@ -193,6 +193,13 @@ SETTINGS: Dict[str, Dict[str, Any]] = {
         "default": "20",
         "description": "The default maximum number of tasks that can fail before the job is marked as failed.",
     },
+    "settings.job_bundle_default_directory": {
+        "default": "",
+        "description": (
+            "The default local directory to open when browsing for job bundles. "
+            "If empty, defaults to the user's home directory."
+        ),
+    },
 }
 
 

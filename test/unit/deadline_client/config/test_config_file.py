@@ -27,6 +27,7 @@ CONFIG_SETTING_ROUND_TRIP = [
     ("defaults.job_attachments_file_system", "COPIED", "VIRTUAL"),
     ("settings.locale", "", "ja_JP"),
     ("settings.force_s3_check", "false", "true"),
+    ("settings.job_bundle_default_directory", "", "/my/bundles"),
 ]
 
 

@@ -80,13 +80,49 @@ class JobBundleSettingsWidget(QWidget):
         """
         Browse and load the selected submission bundle
         """
-        # Open the file picker dialog
-        bundle_path = os.path.expanduser(config_file.get_setting("settings.job_history_dir"))
-        input_job_bundle_dir = QFileDialog.getExistingDirectory(
-            self, "Choose job bundle directory", bundle_path
+        from ..dialogs.job_bundle_browser_dialog import JobBundleBrowserDialog
+        from ...config import get_setting
+        import os
+
+        # Determine the default local browse directory
+        default_dir = os.environ.get("DEADLINE_JOB_BUNDLE_DEFAULT_DIRECTORY", "")
+        if not default_dir:
+            default_dir = get_setting("settings.job_bundle_default_directory")
+
+        # Try to get the queue's S3 bucket for S3 browsing
+        s3_bucket = ""
+        s3_prefix = ""
+        try:
+            farm_id = get_setting("defaults.farm_id")
+            queue_id = get_setting("defaults.queue_id")
+            if farm_id and queue_id:
+                from ....job_attachments._aws.deadline import get_queue
+
+                queue = get_queue(farm_id=farm_id, queue_id=queue_id)
+                if queue.jobAttachmentSettings:
+                    s3_bucket = queue.jobAttachmentSettings.s3BucketName
+                    s3_prefix = queue.jobAttachmentSettings.rootPrefix
+        except Exception:
+            pass
+
+        browser = JobBundleBrowserDialog(
+            local_root=default_dir,
+            s3_bucket_name=s3_bucket,
+            s3_root_prefix=s3_prefix,
+            parent=self,
         )
-        if not input_job_bundle_dir:
+        if browser.exec_() != JobBundleBrowserDialog.Accepted or not browser.selected_path:
             return
+
+        if browser.selected_is_s3 and browser.s3_repo:
+            import tempfile
+
+            temp_dir = tempfile.mkdtemp(prefix="deadline-bundle-")
+            input_job_bundle_dir = browser.s3_repo.download_bundle(
+                browser.selected_path, temp_dir
+            )
+        else:
+            input_job_bundle_dir = browser.selected_path
 
         # Update job bundle directory path
         self.input_job_bundle_dir = input_job_bundle_dir
