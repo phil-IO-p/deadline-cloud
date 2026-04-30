@@ -577,7 +577,11 @@ def bundle_upload(job_bundle_dir, name, archive_format, no_archive, **args):
     import io
 
     from ...job_bundle.loader import is_job_bundle_dir
-    from ...job_bundle.repository import S3_JOB_BUNDLES_PREFIX
+    from ...job_bundle.repository import (
+        S3_JOB_BUNDLES_PREFIX,
+        _extract_bundle_info,
+        _parse_template,
+    )
 
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
     s3_settings = _get_queue_s3_settings(config)
@@ -587,6 +591,29 @@ def bundle_upload(job_bundle_dir, name, archive_format, no_archive, **args):
         raise DeadlineOperationError(
             f"Directory does not appear to be a job bundle (no template.yaml or template.json): {job_bundle_dir}"
         )
+
+    # Parse the template to extract metadata for S3 object metadata
+    bundle_metadata = {}
+    for tname in ("template.yaml", "template.json"):
+        tpath = os.path.join(job_bundle_dir, tname)
+        if os.path.isfile(tpath):
+            with open(tpath, encoding="utf-8") as f:
+                template = _parse_template(f.read(), tname)
+            if template:
+                info = _extract_bundle_info(template, job_bundle_dir)
+                bundle_metadata["bundle-name"] = info.name[:256]
+                if info.description:
+                    # S3 metadata values must be valid HTTP header values (no newlines)
+                    desc = " ".join(info.description.split())
+                    bundle_metadata["bundle-description"] = desc[:512]
+                if info.step_names:
+                    bundle_metadata["bundle-steps"] = ",".join(info.step_names)[:512]
+                if info.parameters:
+                    param_strs = [
+                        f"{p.get('name', '?')}:{p.get('type', '?')}" for p in info.parameters
+                    ]
+                    bundle_metadata["bundle-parameters"] = ",".join(param_strs)[:512]
+            break
 
     bundle_name = name or os.path.basename(job_bundle_dir)
     prefix = f"{s3_settings.rootPrefix.rstrip('/')}/{S3_JOB_BUNDLES_PREFIX}"
@@ -606,9 +633,7 @@ def bundle_upload(job_bundle_dir, name, archive_format, no_archive, **args):
                 s3_key = f"{s3_prefix}{rel_path}"
                 s3.upload_file(local_path, s3_settings.s3BucketName, s3_key)
                 file_count += 1
-        click.echo(
-            f"Uploaded {file_count} files to s3://{s3_settings.s3BucketName}/{s3_prefix}"
-        )
+        click.echo(f"Uploaded {file_count} files to s3://{s3_settings.s3BucketName}/{s3_prefix}")
     else:
         # Archive and upload
         buf = io.BytesIO()
@@ -631,7 +656,12 @@ def bundle_upload(job_bundle_dir, name, archive_format, no_archive, **args):
 
         s3_key = f"{prefix}/{bundle_name}{ext}"
         buf.seek(0)
-        s3.upload_fileobj(buf, s3_settings.s3BucketName, s3_key)
+        s3.upload_fileobj(
+            buf,
+            s3_settings.s3BucketName,
+            s3_key,
+            ExtraArgs={"Metadata": bundle_metadata} if bundle_metadata else None,
+        )
         click.echo(f"Uploaded bundle to s3://{s3_settings.s3BucketName}/{s3_key}")
 
 
@@ -656,7 +686,6 @@ def bundle_download(bundle_name, output_dir, **args):
     """
     from ...job_bundle.repository import (
         S3BundleRepository,
-        ARCHIVE_EXTENSIONS,
     )
 
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
@@ -685,5 +714,5 @@ def bundle_download(bundle_name, output_dir, **args):
             msg += f"\nAvailable bundles: {', '.join(available)}"
         raise DeadlineOperationError(msg)
 
-    local_path = repo.resolve_bundle(match.path, output_dir)
+    local_path = repo.download_full_bundle(match.path, output_dir)
     click.echo(f"Downloaded bundle to: {local_path}")

@@ -120,6 +120,24 @@ Where `{hash}` is a truncated SHA-256 of `{bucket}/{s3-key}` to ensure uniquenes
 
 **Why only archives are cached**: An archive is a single S3 object with a single ETag — one `head_object` validates the entire bundle. Folder-based bundles are multiple objects with no single version identifier, so staleness detection would require checking every file. Folder bundles are downloaded to temp directories with atexit cleanup instead.
 
+### S3 Object Metadata for Preview
+
+When `deadline bundle upload` uploads an archive, it attaches bundle metadata as S3 user metadata on the object:
+
+- `bundle-name`: The template's `name` field
+- `bundle-description`: The template's `description` field (newlines collapsed to spaces)
+- `bundle-steps`: Comma-separated list of step names
+- `bundle-parameters`: Comma-separated `name:type` pairs
+
+This metadata is returned by `head_object`, which is already called for ETag validation. This means preview of uploaded archives requires **zero downloads** — a single `head_object` provides both cache validation and all preview information.
+
+The preview priority chain for S3 archives:
+1. **S3 user metadata** from `head_object` → instant, no download
+2. **Local cache** if ETag matches → read template from disk
+3. **Download archive** → parse template, populate cache (fallback for archives not uploaded via the CLI)
+
+S3 user metadata has a 2KB total limit, which is sufficient for typical bundle metadata. Values are truncated to stay within limits.
+
 ### Detection: What Is a Job Bundle?
 
 - **Directories** (local or S3 prefix): contains `template.yaml` or `template.json`.
@@ -129,10 +147,10 @@ For `list_entries`, detection is kept fast:
 
 - **Local directories**: stat check for template file existence (no parsing).
 - **Local archives**: matched by file extension only.
-- **S3 prefixes**: `head_object` for template file existence.
-- **S3 archives**: matched by key extension only.
+- **S3 folders**: detected via batch recursive listing — a single `list_objects_v2` (without delimiter) returns all keys under the parent prefix, and we check in-memory which child prefixes contain a template file. This replaces per-folder `head_object` calls, reducing N+1 API calls to 2 (one delimited list + one recursive list).
+- **S3 archives**: matched by key extension only (no API call).
 
-Full template parsing happens only in `get_bundle_info` when the user selects a bundle for preview.
+Full template parsing happens only in `get_bundle_info` when the user clicks a bundle for preview.
 
 ### Browser Dialog UI
 
@@ -212,8 +230,10 @@ After the user selects a bundle in the browser, it must be resolved to a local d
 |---|---|---|---|
 | Local | Directory | Used directly (no copy) | None needed |
 | Local | Archive | Extracted to temp dir | atexit cleanup |
-| S3 | Directory (folder) | Downloaded to temp dir | atexit cleanup |
+| S3 | Directory (folder) | Metadata files only (template, parameters, asset_references, hooks) | atexit cleanup |
 | S3 | Archive | Downloaded, cached with ETag, extracted to cache dir | Persists in cache |
+
+The CLI `deadline bundle download` command uses a separate `download_full_bundle()` path that downloads all files (including scripts and data), with a 50 MB size limit for folder bundles. Bundles larger than this should be uploaded as archives instead.
 
 Once resolved to a local directory, the standard submission flow takes over: `read_job_bundle_parameters()` parses the template and resolves relative PATH defaults against the bundle directory, `apply_job_parameters()` processes asset references, and the job is submitted normally.
 
@@ -275,8 +295,9 @@ Downloaded bundle to: /tmp/bundles/blender-render
 
 - **Authentication**: S3 browsing and CLI commands use the same boto3 session/profile as the rest of deadline-cloud. No separate auth flow.
 - **Permissions**: Requires `s3:ListBucket` and `s3:GetObject` on the queue's attachment bucket for browsing/download. Upload additionally requires `s3:PutObject`. If access is denied, show an error rather than crashing.
-- **Performance**: Each directory expansion is one `list_objects_v2` call. Folder bundle detection adds one `head_object` per child prefix. Archive bundles are detected by extension (no API call). Cached archives validate with one `head_object`.
-- **Template preview**: For S3 archives, the full archive is downloaded to parse the template (archives are typically small). For S3 folders, only the template file is fetched. Cached archives read the template from the local cache.
+- **Performance**: Listing is 2 API calls (one delimited + one recursive `list_objects_v2`). Archive preview with S3 metadata is 1 `head_object` (no download). Folder preview is 1 `get_object` for the template. Cached archive selection is 1 `head_object`.
+- **S3 object metadata**: `deadline bundle upload` attaches bundle name, description, steps, and parameters as S3 user metadata. This enables zero-download preview via `head_object`. Archives uploaded by other means fall back to downloading the archive for preview.
+- **Folder bundle size limit**: Folder bundles larger than 50 MB cannot be downloaded via the CLI. Use `deadline bundle upload` to convert them to archives.
 - **Bundled assets**: Scripts, data files, and other assets within the bundle are included in the archive or folder download. Relative PATH parameters resolve against the extracted/downloaded copy.
 
 ## Out of Scope (Future)

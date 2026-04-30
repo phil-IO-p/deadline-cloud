@@ -7,21 +7,20 @@ Shows a navigable tree of directories/bundles with a preview panel.
 
 from __future__ import annotations
 
-import os
 from logging import getLogger
-from typing import Optional, Union
+from typing import Optional
 
 from qtpy.QtCore import Qt, QModelIndex, Signal  # type: ignore
-from qtpy.QtGui import QStandardItemModel, QStandardItem, QIcon  # type: ignore
+from qtpy.QtGui import QStandardItemModel, QStandardItem  # type: ignore
 from qtpy.QtWidgets import (  # type: ignore
     QDialog,
     QDialogButtonBox,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSplitter,
     QTreeView,
     QVBoxLayout,
@@ -31,7 +30,6 @@ from qtpy.QtWidgets import (  # type: ignore
 from .._utils import tr
 from ...job_bundle.repository import (
     BrowseEntry,
-    BundleInfo,
     BundleRepository,
     LocalBundleRepository,
     S3BundleRepository,
@@ -124,7 +122,7 @@ class JobBundleBrowserDialog(QDialog):
         self._tree.selectionModel().currentChanged.connect(self._on_selection_changed)
         splitter.addWidget(self._tree)
 
-        # Right: preview panel
+        # Right: preview panel in a scroll area
         preview_widget = QWidget()
         preview_layout = QVBoxLayout(preview_widget)
         preview_layout.setAlignment(Qt.AlignTop)
@@ -153,7 +151,11 @@ class JobBundleBrowserDialog(QDialog):
         preview_layout.addWidget(self._preview_params)
 
         self._clear_preview()
-        splitter.addWidget(preview_widget)
+
+        preview_scroll = QScrollArea()
+        preview_scroll.setWidget(preview_widget)
+        preview_scroll.setWidgetResizable(True)
+        splitter.addWidget(preview_scroll)
         splitter.setSizes([350, 350])
 
         # Bottom: source toggle + path + buttons
@@ -223,7 +225,7 @@ class JobBundleBrowserDialog(QDialog):
 
     @staticmethod
     def _entry_display(entry: BrowseEntry) -> str:
-        icon = "\U0001F4E6" if entry.is_bundle else "\U0001F4C1"  # 📦 or 📁
+        icon = "\U0001f4e6" if entry.is_bundle else "\U0001f4c1"  # 📦 or 📁
         return f"{icon} {entry.name}"
 
     # ── Event Handlers ───────────────────────────────────────────
@@ -289,6 +291,7 @@ class JobBundleBrowserDialog(QDialog):
             return
 
         self._preview_name.setText(info.name)
+        self._preview_name.setStyleSheet("font-weight: bold; font-size: 14px;")
         self._preview_name.setVisible(True)
 
         if info.description:
@@ -299,9 +302,7 @@ class JobBundleBrowserDialog(QDialog):
 
         if info.step_names:
             self._preview_steps_label.setVisible(True)
-            self._preview_steps.setText(
-                "\n".join(f"  \u2022 {name}" for name in info.step_names)
-            )
+            self._preview_steps.setText("\n".join(f"  \u2022 {name}" for name in info.step_names))
             self._preview_steps.setVisible(True)
         else:
             self._preview_steps_label.setVisible(False)

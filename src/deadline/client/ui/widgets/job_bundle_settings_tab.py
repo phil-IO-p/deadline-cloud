@@ -14,7 +14,6 @@ from qtpy.QtCore import Signal  # type: ignore
 from qtpy.QtWidgets import (  # type: ignore
     QVBoxLayout,
     QWidget,
-    QFileDialog,
     QMessageBox,
 )
 
@@ -23,7 +22,6 @@ from .openjd_parameters_widget import OpenJDParametersWidget
 from ...job_bundle.submission import AssetReferences
 from ...job_bundle.loader import read_yaml_or_json_object, validate_directory_symlink_containment
 from ...job_bundle.parameters import read_job_bundle_parameters
-from ...config import config_file
 
 logger = getLogger(__name__)
 
@@ -82,7 +80,6 @@ class JobBundleSettingsWidget(QWidget):
         """
         from ..dialogs.job_bundle_browser_dialog import JobBundleBrowserDialog
         from ...config import get_setting
-        import os
 
         # Determine the default local browse directory
         default_dir = os.environ.get("DEADLINE_JOB_BUNDLE_DEFAULT_DIRECTORY", "")
@@ -116,9 +113,7 @@ class JobBundleSettingsWidget(QWidget):
 
         if browser.selected_is_s3 and browser.s3_repo:
             if browser.selected_is_archive:
-                input_job_bundle_dir = browser.s3_repo.resolve_bundle(
-                    browser.selected_path, ""
-                )
+                input_job_bundle_dir = browser.s3_repo.resolve_bundle(browser.selected_path, "")
             else:
                 import tempfile
                 import atexit

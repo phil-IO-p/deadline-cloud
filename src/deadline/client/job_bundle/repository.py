@@ -12,7 +12,6 @@ import io
 import json
 import os
 import tarfile
-import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from logging import getLogger
@@ -303,6 +302,28 @@ def _write_cache_meta(cache_dir: str, etag: str, last_modified: str) -> None:
 # ── S3 Repository ────────────────────────────────────────────
 
 
+def _bundle_info_from_s3_metadata(metadata: dict, path: str) -> Optional[BundleInfo]:
+    """Try to construct BundleInfo from S3 user metadata set during upload.
+    Returns None if the required 'bundle-name' key is missing."""
+    name = metadata.get("bundle-name")
+    if not name:
+        return None
+    params = []
+    params_str = metadata.get("bundle-parameters", "")
+    if params_str:
+        for p in params_str.split(","):
+            parts = p.split(":", 1)
+            if len(parts) == 2:
+                params.append({"name": parts[0], "type": parts[1]})
+    return BundleInfo(
+        path=path,
+        name=name,
+        description=metadata.get("bundle-description", ""),
+        step_names=[s for s in metadata.get("bundle-steps", "").split(",") if s],
+        parameters=params,
+    )
+
+
 class S3BundleRepository:
     """Browse job bundles in an S3 bucket under {rootPrefix}/job-bundles/.
     Supports both folder-based bundles and archive bundles (.zip, .tar.gz, etc.).
@@ -323,18 +344,16 @@ class S3BundleRepository:
     def list_entries(self, path: str) -> list[BrowseEntry]:
         prefix = self._to_s3_prefix(path)
         entries: list[BrowseEntry] = []
+        child_prefixes: list[tuple[str, str, str]] = []  # (name, child_prefix, child_path)
         try:
             paginator = self._s3.get_paginator("list_objects_v2")
-            for page in paginator.paginate(
-                Bucket=self._bucket, Prefix=prefix, Delimiter="/"
-            ):
+            for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix, Delimiter="/"):
                 # Folder-based bundles (common prefixes)
                 for cp in page.get("CommonPrefixes", []):
                     child_prefix = cp["Prefix"]
                     name = child_prefix.rstrip("/").rsplit("/", 1)[-1]
                     child_path = f"s3://{self._bucket}/{child_prefix}"
-                    is_bundle = self._is_folder_bundle(child_prefix)
-                    entries.append(BrowseEntry(name=name, path=child_path, is_bundle=is_bundle))
+                    child_prefixes.append((name, child_prefix, child_path))
                 # Archive bundles (objects with archive extensions)
                 for obj in page.get("Contents", []):
                     key = obj["Key"]
@@ -351,6 +370,16 @@ class S3BundleRepository:
                         )
         except Exception:
             logger.warning("Failed to list S3 prefix %s", prefix, exc_info=True)
+            return entries
+
+        # Batch-detect which folders are bundles with a single recursive listing
+        # instead of per-folder head_object calls
+        if child_prefixes:
+            bundle_prefixes = self._batch_detect_bundles(prefix, child_prefixes)
+            for name, child_prefix, child_path in child_prefixes:
+                is_bundle = child_prefix in bundle_prefixes
+                entries.append(BrowseEntry(name=name, path=child_path, is_bundle=is_bundle))
+
         return entries
 
     def get_bundle_info(self, path: str) -> Optional[BundleInfo]:
@@ -359,10 +388,19 @@ class S3BundleRepository:
         return self._get_folder_bundle_info(path)
 
     def resolve_bundle(self, path: str, dest_dir: str) -> str:
-        """Resolve an S3 bundle to a local directory path.
-        For archives: downloads, caches with ETag, and extracts.
-        For folders: downloads all objects to dest_dir.
+        """Resolve an S3 bundle to a local directory path for the submitter dialog.
+        For archives: downloads, caches with ETag, and extracts (full bundle).
+        For folders: downloads only metadata files (template, parameters, etc.).
         Returns the local path to the usable bundle directory."""
+        if self._path_is_archive(path):
+            return self._resolve_archive_bundle(path)
+        return self._download_folder_bundle_metadata(path, dest_dir)
+
+    def download_full_bundle(self, path: str, dest_dir: str) -> str:
+        """Download a complete S3 bundle to a local directory.
+        For archives: uses the ETag cache.
+        For folders: downloads all objects (with size check).
+        Use this for the CLI 'download' command."""
         if self._path_is_archive(path):
             return self._resolve_archive_bundle(path)
         return self._download_folder_bundle(path, dest_dir)
@@ -386,12 +424,33 @@ class S3BundleRepository:
                 continue
         return None
 
+    # Maximum total size (in bytes) for downloading an S3 folder bundle.
+    # Folder bundles larger than this should be uploaded as archives instead.
+    MAX_FOLDER_BUNDLE_SIZE = 50 * 1024 * 1024  # 50 MB
+
+    # Files downloaded during resolve (enough to populate the submitter dialog).
+    # The full bundle is only downloaded at submission time.
+    _METADATA_FILES = (
+        "template.yaml",
+        "template.json",
+        "parameter_values.yaml",
+        "parameter_values.json",
+        "asset_references.yaml",
+        "asset_references.json",
+        "hooks.yaml",
+        "hooks.json",
+    )
+
     def _download_folder_bundle(self, path: str, dest_dir: str) -> str:
+        """Download all objects under the bundle prefix to a local directory."""
         prefix = self._to_s3_prefix(path)
         bundle_name = prefix.rstrip("/").rsplit("/", 1)[-1]
         local_bundle = os.path.join(dest_dir, bundle_name)
         os.makedirs(local_bundle, exist_ok=True)
 
+        # Collect all objects and check total size before downloading
+        objects_to_download: list[tuple[str, str]] = []  # (key, rel_path)
+        total_size = 0
         paginator = self._s3.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
             for obj in page.get("Contents", []):
@@ -399,9 +458,38 @@ class S3BundleRepository:
                 rel = key[len(prefix) :]
                 if not rel:
                     continue
-                local_path = os.path.join(local_bundle, rel)
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                total_size += obj.get("Size", 0)
+                objects_to_download.append((key, rel))
+
+        if total_size > self.MAX_FOLDER_BUNDLE_SIZE:
+            raise RuntimeError(
+                f"S3 folder bundle '{bundle_name}' is {total_size / (1024 * 1024):.1f} MB, "
+                f"which exceeds the {self.MAX_FOLDER_BUNDLE_SIZE / (1024 * 1024):.0f} MB limit. "
+                f"Upload it as an archive instead using 'deadline bundle upload'."
+            )
+
+        for key, rel in objects_to_download:
+            local_path = os.path.join(local_bundle, rel)
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            self._s3.download_file(self._bucket, key, local_path)
+
+        return local_bundle
+
+    def _download_folder_bundle_metadata(self, path: str, dest_dir: str) -> str:
+        """Download only the metadata files (template, parameters, asset_references, hooks)
+        needed to populate the submitter dialog. Skips scripts and data files."""
+        prefix = self._to_s3_prefix(path)
+        bundle_name = prefix.rstrip("/").rsplit("/", 1)[-1]
+        local_bundle = os.path.join(dest_dir, bundle_name)
+        os.makedirs(local_bundle, exist_ok=True)
+
+        for fname in self._METADATA_FILES:
+            key = prefix + fname
+            local_path = os.path.join(local_bundle, fname)
+            try:
                 self._s3.download_file(self._bucket, key, local_path)
+            except Exception:
+                continue  # File doesn't exist, skip
 
         return local_bundle
 
@@ -414,6 +502,28 @@ class S3BundleRepository:
                 continue
         return False
 
+    def _batch_detect_bundles(
+        self, parent_prefix: str, child_prefixes: list[tuple[str, str, str]]
+    ) -> set[str]:
+        """Detect which child prefixes are bundles using a single recursive listing.
+        Returns the set of child_prefix strings that contain a template file."""
+        bundle_set: set[str] = set()
+        child_prefix_set = {cp for _, cp, _ in child_prefixes}
+        try:
+            paginator = self._s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self._bucket, Prefix=parent_prefix):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    # Check if this key is a template file directly inside a child prefix
+                    for cp in child_prefix_set:
+                        for fname in TEMPLATE_FILENAMES:
+                            if key == cp + fname:
+                                bundle_set.add(cp)
+                                break
+        except Exception:
+            logger.debug("Failed batch bundle detection for %s", parent_prefix, exc_info=True)
+        return bundle_set
+
     # ── Archive bundles ──────────────────────────────────────
 
     def _get_archive_bundle_info(self, path: str) -> Optional[BundleInfo]:
@@ -421,14 +531,24 @@ class S3BundleRepository:
         cache_dir = os.path.join(_get_bundle_cache_dir(), _cache_key(self._bucket, key))
         meta = _read_cache_meta(cache_dir)
 
-        if meta:
-            try:
-                head = self._s3.head_object(Bucket=self._bucket, Key=key)
-                if head.get("ETag") == meta.get("etag"):
-                    # Cache is valid — read template from extracted cache
-                    return self._read_info_from_cache(cache_dir, path)
-            except Exception:
-                pass
+        # Always do a head_object first — it's cheap and gives us both
+        # ETag (for cache validation) and user metadata (for preview without download)
+        head = None
+        try:
+            head = self._s3.head_object(Bucket=self._bucket, Key=key)
+        except Exception:
+            pass
+
+        if head:
+            # Try S3 user metadata for preview (set by 'deadline bundle upload')
+            s3_metadata = head.get("Metadata", {})
+            info = _bundle_info_from_s3_metadata(s3_metadata, path)
+            if info:
+                return info
+
+            # Check local cache validity
+            if meta and head.get("ETag") == meta.get("etag"):
+                return self._read_info_from_cache(cache_dir, path)
 
         # Cache miss or stale — download, cache, and parse
         try:

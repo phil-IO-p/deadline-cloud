@@ -7,12 +7,9 @@ import os
 import tarfile
 import zipfile
 
-import pytest
 import yaml
 
 from deadline.client.job_bundle.repository import (
-    BrowseEntry,
-    BundleInfo,
     LocalBundleRepository,
     _extract_bundle_info,
     _is_archive,
@@ -118,9 +115,7 @@ class TestReadTemplateFromArchive:
         assert fname == "template.yaml"
 
     def test_zip_wrapped_template(self, tmp_path):
-        path = self._make_zip(
-            tmp_path, {"my-bundle/template.yaml": "name: Wrapped\nsteps: []\n"}
-        )
+        path = self._make_zip(tmp_path, {"my-bundle/template.yaml": "name: Wrapped\nsteps: []\n"})
         result = _read_template_from_archive_path(path)
         assert result is not None
         raw, fname = result

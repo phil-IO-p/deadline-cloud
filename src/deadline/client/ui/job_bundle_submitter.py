@@ -10,7 +10,6 @@ from qtpy.QtCore import Qt  # pylint: disable=import-error
 from ._utils import tr
 from qtpy.QtWidgets import (  # pylint: disable=import-error; type: ignore
     QApplication,
-    QFileDialog,
     QMainWindow,
     QMessageBox,
     QWidget,
@@ -216,7 +215,7 @@ def show_job_bundle_submitter(
 
     if not input_job_bundle_dir:
         from .dialogs.job_bundle_browser_dialog import JobBundleBrowserDialog
-        from ..config import config_file, get_setting
+        from ..config import get_setting
 
         # Determine the default local browse directory
         default_dir = os.environ.get("DEADLINE_JOB_BUNDLE_DEFAULT_DIRECTORY", "")
@@ -251,9 +250,7 @@ def show_job_bundle_submitter(
         if browser.selected_is_s3 and browser.s3_repo:
             if browser.selected_is_archive:
                 # Archive bundles are cached locally with ETag validation
-                input_job_bundle_dir = browser.s3_repo.resolve_bundle(
-                    browser.selected_path, ""
-                )
+                input_job_bundle_dir = browser.s3_repo.resolve_bundle(browser.selected_path, "")
             else:
                 # Folder bundles are downloaded to a temp directory
                 import tempfile
