@@ -221,6 +221,8 @@ def show_job_bundle_submitter(
         default_dir = os.environ.get("DEADLINE_JOB_BUNDLE_DEFAULT_DIRECTORY", "")
         if not default_dir:
             default_dir = get_setting("settings.job_bundle_default_directory")
+        if default_dir:
+            default_dir = os.path.expanduser(default_dir)
 
         # Try to get the queue's S3 bucket for S3 browsing
         s3_bucket = ""

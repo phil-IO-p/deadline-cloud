@@ -189,6 +189,15 @@ def _extract_bundle_info(
             if "name" in pv and "value" in pv:
                 pv_map[pv["name"]] = pv["value"]
 
+    # Build a combined value map: parameter_values > defaults
+    value_map: dict[str, str] = {}
+    for p in params:
+        pname = p.get("name", "")
+        if "default" in p:
+            value_map[pname] = str(p["default"])
+    # parameter_values override defaults
+    value_map.update(pv_map)
+
     # Attach resolved value to each parameter: parameter_values > default > empty
     for p in params:
         name = p.get("name", "")
@@ -197,9 +206,19 @@ def _extract_bundle_info(
         elif "default" in p:
             p["_display_value"] = str(p["default"])
 
+    # Resolve {{Param.X}} references in the name
+    raw_name = template.get("name", os.path.basename(path.rstrip("/")))
+    import re
+
+    def _replace_param(m):
+        param_name = m.group(1)
+        return value_map.get(param_name, m.group(0))
+
+    resolved_name = re.sub(r"\{\{Param\.(\w+)\}\}", _replace_param, raw_name)
+
     return BundleInfo(
         path=path,
-        name=template.get("name", os.path.basename(path.rstrip("/"))),
+        name=resolved_name,
         description=template.get("description", ""),
         step_names=[s.get("name", "") for s in template.get("steps", [])],
         parameters=params,

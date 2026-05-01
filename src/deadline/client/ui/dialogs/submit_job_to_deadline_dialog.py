@@ -627,6 +627,7 @@ class SubmitJobToDeadlineDialog(QDialog):
         from ....job_attachments._aws.deadline import get_queue
         from ...job_bundle.repository import (
             S3_JOB_BUNDLES_PREFIX,
+            LocalBundleRepository,
             _extract_bundle_info,
             _parse_template,
         )
@@ -688,8 +689,10 @@ class SubmitJobToDeadlineDialog(QDialog):
                 with open(tpath, encoding="utf-8") as f:
                     template = _parse_template(f.read(), tname)
                 if template:
-                    info = _extract_bundle_info(template, self.job_history_bundle_dir)
-                    bundle_metadata["bundle-name"] = info.name[:256]
+                    pv = LocalBundleRepository._read_parameter_values(self.job_history_bundle_dir)
+                    info = _extract_bundle_info(template, self.job_history_bundle_dir, pv)
+                    # Use settings.name which is already resolved by the UI
+                    bundle_metadata["bundle-name"] = settings.name[:256]
                     if info.description:
                         bundle_metadata["bundle-description"] = " ".join(info.description.split())[
                             :512
@@ -705,7 +708,23 @@ class SubmitJobToDeadlineDialog(QDialog):
 
         # Archive and upload
         try:
-            bundle_name = settings.name.replace(" ", "_").replace("/", "_")
+            # Resolve any {{Param.X}} in the name using current parameter values
+            import re
+
+            param_value_map = {
+                p["name"]: p.get("value", p.get("default", "")) for p in queue_parameters
+            }
+            for p in settings.parameters:
+                param_value_map[p["name"]] = p.get("value", p.get("default", ""))
+
+            resolved_name = re.sub(
+                r"\{\{Param\.(\w+)\}\}",
+                lambda m: str(param_value_map.get(m.group(1), m.group(0))),
+                settings.name,
+            )
+            bundle_metadata["bundle-name"] = resolved_name[:256]
+
+            bundle_name = resolved_name.replace(" ", "_").replace("/", "_")
             prefix = f"{s3_settings.rootPrefix.rstrip('/')}/{S3_JOB_BUNDLES_PREFIX}"
             s3_key = f"{prefix}/{bundle_name}.zip"
 

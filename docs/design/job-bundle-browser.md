@@ -157,7 +157,7 @@ S3 user metadata has a 2KB total limit, which is sufficient for typical bundle m
 For `list_entries`, detection is kept fast:
 
 - **Local directories**: stat check for template file existence (no parsing).
-- **Local archives**: matched by file extension only.
+- **Local archives**: matched by file extension, then validated by checking for a template inside the archive. This prevents random zip files from appearing as bundles. Archive scanning can be disabled via `include_archives=False` on `LocalBundleRepository` (used by the browser for Local/History sources, and via `--no-archives` in the CLI).
 - **S3 folders**: detected via batch recursive listing — a single `list_objects_v2` (without delimiter) returns all keys under the parent prefix, and we check in-memory which child prefixes contain a template file. This replaces per-folder `head_object` calls, reducing N+1 API calls to 2 (one delimited list + one recursive list).
 - **S3 archives**: matched by key extension only (no API call).
 
@@ -197,7 +197,7 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 - Non-bundle, non-archive files are hidden.
 
 **Right panel** — Preview (shown when a bundle is selected, scrollable):
-- **Name**: From the template's `name` field.
+- **Name**: From the template's `name` field. `{{Param.X}}` references are resolved using values from `parameter_values.yaml` or template defaults.
 - **Description**: From the template's `description` field, if present.
 - **Steps**: List of step names from the template, in definition order.
 - **Parameters**: Name, type, and value of each parameter definition, in definition order. Values are resolved in priority order: `parameter_values.yaml`/`.json` > template `default` > blank. For S3 archives, values are available once the bundle is cached locally (first click caches, subsequent clicks show values).
@@ -209,7 +209,9 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 
 ### Share Button
 
-The submitter dialog includes a "Share" button alongside the existing "Export bundle" and "Submit" buttons. Clicking "Share" archives the current job bundle and uploads it to the queue's S3 `job-bundles/` folder, making it available to the team via the browser's S3 source. The bundle name defaults to the job name. S3 user metadata (name, description, steps, parameters) is attached for zero-download preview.
+The submitter dialog includes a "Share" button alongside the existing "Export bundle" and "Submit" buttons. Clicking "Share" archives the current job bundle and uploads it to the queue's S3 `job-bundles/` folder, making it available to the team via the browser's S3 source. The bundle name defaults to the job name, with `{{Param.X}}` references resolved using current parameter values. S3 user metadata (name, description, steps, parameters) is attached for zero-download preview.
+
+Note: uploading a bundle with the same name as an existing one silently overwrites it in S3.
 
 ### Lazy Loading
 

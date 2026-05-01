@@ -793,6 +793,7 @@ def bundle_upload(job_bundle_dir, name, archive_format, no_archive, **args):
     from ...job_bundle.loader import is_job_bundle_dir
     from ...job_bundle.repository import (
         S3_JOB_BUNDLES_PREFIX,
+        LocalBundleRepository,
         _extract_bundle_info,
         _parse_template,
     )
@@ -814,7 +815,11 @@ def bundle_upload(job_bundle_dir, name, archive_format, no_archive, **args):
             with open(tpath, encoding="utf-8") as f:
                 template = _parse_template(f.read(), tname)
             if template:
-                info = _extract_bundle_info(template, job_bundle_dir)
+                info = _extract_bundle_info(
+                    template,
+                    job_bundle_dir,
+                    LocalBundleRepository._read_parameter_values(job_bundle_dir),
+                )
                 bundle_metadata["bundle-name"] = info.name[:256]
                 if info.description:
                     # S3 metadata values must be valid HTTP header values (no newlines)
