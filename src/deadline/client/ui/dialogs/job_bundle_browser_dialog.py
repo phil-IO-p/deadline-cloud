@@ -7,6 +7,7 @@ Shows a navigable tree of directories/bundles with a preview panel.
 
 from __future__ import annotations
 
+import os
 from logging import getLogger
 from typing import Optional
 
@@ -62,12 +63,13 @@ class JobBundleBrowserDialog(QDialog):
         local_root: str = "",
         s3_bucket_name: str = "",
         s3_root_prefix: str = "",
+        job_history_dir: str = "",
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent=parent)
         self.setWindowTitle(tr("Browse Job Bundles"))
-        self.setMinimumSize(700, 500)
-        self.resize(800, 550)
+        self.setMinimumSize(750, 550)
+        self.resize(850, 620)
 
         self._local_repo = LocalBundleRepository(root=local_root)
         self._s3_repo: Optional[S3BundleRepository] = None
@@ -77,12 +79,19 @@ class JobBundleBrowserDialog(QDialog):
                 bucket_name=s3_bucket_name, root_prefix=s3_root_prefix
             )
 
+        self._history_dir = job_history_dir
+        self._history_repo: Optional[LocalBundleRepository] = None
+        if job_history_dir and os.path.isdir(job_history_dir):
+            self._history_repo = LocalBundleRepository(root=job_history_dir)
+
         self._current_repo: BundleRepository = self._local_repo
         self._selected_path: Optional[str] = None
         self._selected_is_s3 = False
         self._selected_is_archive = False
+        self._ready = False
 
         self._build_ui()
+        self._ready = True
         self._populate_root()
 
     @property
@@ -143,7 +152,6 @@ class JobBundleBrowserDialog(QDialog):
         # Right: preview panel in a scroll area
         preview_widget = QWidget()
         preview_layout = QVBoxLayout(preview_widget)
-        preview_layout.setAlignment(Qt.AlignTop)
 
         self._preview_name = QLabel()
         self._preview_name.setWordWrap(True)
@@ -168,6 +176,9 @@ class JobBundleBrowserDialog(QDialog):
         self._preview_params.setWordWrap(True)
         preview_layout.addWidget(self._preview_params)
 
+        preview_layout.addStretch()
+        preview_layout.addWidget(self._preview_params)
+
         self._clear_preview()
 
         preview_scroll = QScrollArea()
@@ -178,24 +189,36 @@ class JobBundleBrowserDialog(QDialog):
 
         # Bottom: source toggle + path + buttons
         bottom_layout = QVBoxLayout()
+        bottom_layout.setContentsMargins(0, 8, 0, 0)
 
-        # Source toggle row
+        # Source toggle row — S3 first (primary use case), then History, then Local
         source_row = QHBoxLayout()
         source_label = QLabel(tr("Source:"))
         source_row.addWidget(source_label)
-        self._radio_local = QRadioButton(tr("Local"))
-        self._radio_local.setChecked(True)
-        self._radio_local.toggled.connect(self._on_source_changed)
-        source_row.addWidget(self._radio_local)
         self._radio_s3 = QRadioButton(
             tr("S3 ({bucket})").format(
                 bucket=self._s3_repo._bucket if self._s3_repo else tr("not configured")
             )
         )
         self._radio_s3.setEnabled(self._s3_available)
+        self._radio_s3.toggled.connect(self._on_source_changed)
         source_row.addWidget(self._radio_s3)
+        self._radio_history = QRadioButton(tr("History"))
+        self._radio_history.setEnabled(self._history_repo is not None)
+        self._radio_history.toggled.connect(self._on_source_changed)
+        source_row.addWidget(self._radio_history)
+        self._radio_local = QRadioButton(tr("Local"))
+        self._radio_local.toggled.connect(self._on_source_changed)
+        source_row.addWidget(self._radio_local)
         source_row.addStretch()
         bottom_layout.addLayout(source_row)
+
+        # Default to S3 if available, otherwise Local
+        if self._s3_available:
+            self._radio_s3.setChecked(True)
+            self._current_repo = self._s3_repo
+        else:
+            self._radio_local.setChecked(True)
 
         # Path row
         path_row = QHBoxLayout()
@@ -290,7 +313,7 @@ class JobBundleBrowserDialog(QDialog):
 
         if is_bundle:
             self._selected_path = path
-            self._selected_is_s3 = not self._radio_local.isChecked()
+            self._selected_is_s3 = self._radio_s3.isChecked()
             self._selected_is_archive = bool(item.data(ROLE_IS_ARCHIVE))
             self._select_button.setEnabled(True)
             self._load_preview(path)
@@ -333,10 +356,14 @@ class JobBundleBrowserDialog(QDialog):
         return _search(self._model.invisibleRootItem())
 
     def _on_source_changed(self, checked: bool):
+        if not self._ready:
+            return
         if self._radio_local.isChecked():
             self._current_repo = self._local_repo
-        elif self._s3_repo:
+        elif self._radio_s3.isChecked() and self._s3_repo:
             self._current_repo = self._s3_repo
+        elif self._radio_history.isChecked() and self._history_repo:
+            self._current_repo = self._history_repo
         self._selected_path = None
         self._select_button.setEnabled(False)
         self._clear_preview()

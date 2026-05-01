@@ -100,6 +100,17 @@ s3://my-farm-bucket/DeadlineCloud/job-bundles/
             process.py
 ```
 
+### Job History Source
+
+The Job History source browses the job history directory for the current AWS profile, as configured by `settings.job_history_dir` (default: `~/.deadline/job_history/{aws_profile_name}`). This directory contains bundles from previous submissions, organized by date.
+
+This is useful for:
+- Re-submitting a previous job with modified parameters.
+- Using a previously submitted bundle as a starting point for a new submission.
+- Reviewing what was submitted in the past.
+
+The Job History source uses the same `LocalBundleRepository` as the Local source, just rooted at the job history directory instead of the user's home or configured default.
+
 ### S3 Archive Caching
 
 Archive bundles from S3 are cached locally to avoid re-downloading on repeated use.
@@ -172,7 +183,7 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 │                               │    • Format (STRING)       │
 │                               │                            │
 ├────────────────────────────────┴────────────────────────────┤
-│  Source: ( ) Local  (•) S3 (my-farm-bucket)                 │
+│  Source: ( ) Local  (•) S3 (my-farm-bucket)  ( ) History   │
 │  Path:  [/job-bundles/                      ]               │
 │                                          [Cancel] [Select]  │
 └─────────────────────────────────────────────────────────────┘
@@ -192,7 +203,7 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 - **Parameters**: Name and type of each parameter definition.
 
 **Bottom bar**:
-- Radio toggle between Local and S3 source. S3 option shows the bucket name from the queue. S3 option is disabled if the queue has no job attachment settings.
+- Radio toggle between Local, S3, and Job History sources. S3 option shows the bucket name from the queue and is disabled if the queue has no job attachment settings. Job History browses the `settings.job_history_dir` for the current AWS profile, showing previously submitted bundles.
 - Path display showing the current browse location.
 - Cancel and Select buttons. Select is enabled only when a valid bundle is highlighted.
 
@@ -216,6 +227,8 @@ Add a new setting for the default local browse directory:
 ```
 
 Environment variable override: `DEADLINE_JOB_BUNDLE_DEFAULT_DIRECTORY`
+
+This setting is also exposed in the Deadline Cloud settings dialog (Settings → General settings) as a "Job bundle directory" picker, alongside the existing "Job history directory" setting.
 
 ### CLI Integration
 
@@ -245,14 +258,88 @@ Bundled assets (scripts, data files) with relative paths resolve correctly again
 | File | Change |
 |---|---|
 | `config/config_file.py` | Add `settings.job_bundle_default_directory` to `SETTINGS` |
-| `cli/_groups/bundle_group.py` | Add `deadline bundle upload` and `deadline bundle download` commands |
-| `ui/dialogs/job_bundle_browser_dialog.py` | **New file.** The browser dialog. |
+| `cli/_groups/bundle_group.py` | Add `deadline bundle list`, `deadline bundle upload`, `deadline bundle download`, and `deadline bundle cache` (clean/update) commands |
+| `ui/dialogs/job_bundle_browser_dialog.py` | **New file.** The browser dialog with filter, Local/S3/History sources. |
+| `ui/dialogs/deadline_config_dialog.py` | Add "Job bundle directory" picker to the settings dialog |
 | `ui/widgets/job_bundle_settings_tab.py` | `on_load_bundle` opens the new browser dialog instead of `QFileDialog` |
 | `ui/job_bundle_submitter.py` | `show_job_bundle_submitter` uses the new browser dialog when `browse=True`; handles archive extraction and S3 resolution |
 | `job_bundle/loader.py` | Add `is_job_bundle_dir(path) -> bool` helper for quick detection |
 | `job_bundle/repository.py` | **New file.** `BundleRepository` protocol, `LocalBundleRepository`, `S3BundleRepository`, archive helpers, cache management |
 
 ### CLI Commands
+
+#### `deadline bundle list`
+
+Lists job bundles available in the queue's S3 `job-bundles/` folder.
+
+- Default output is one bundle name per line, suitable for piping.
+- `--output json`: JSON array with name, format (archive/folder), and S3 path.
+- `--profile`, `--farm-id`, `--queue-id`: Standard config overrides.
+
+```
+$ deadline bundle list
+blender-render
+maya-arnold
+monte_carlo_simulation
+simple_job
+
+$ deadline bundle list --output json
+[{"name": "blender-render", "path": "s3://bucket/prefix/job-bundles/blender-render.zip", "format": "archive"}, ...]
+
+$ deadline bundle list | head -1 | xargs deadline bundle gui-submit --browse
+```
+
+The plain-text output enables chaining with other commands — e.g. selecting a bundle interactively with `fzf`:
+
+```
+$ deadline bundle submit $(deadline bundle download $(deadline bundle list | fzf) -o /tmp/bundles)
+```
+
+Use `jq` with JSON output to filter by format or extract paths:
+
+```
+$ deadline bundle list --output json | jq -r '.[] | select(.format == "archive") | .name'
+blender-render
+maya-arnold
+
+$ deadline bundle list --output json | jq -r '.[0].path'
+s3://my-farm-bucket/DeadlineCloud/job-bundles/blender-render.zip
+```
+
+#### `deadline bundle cache clean`
+
+Removes cached S3 bundle archives from the local cache.
+
+- With no arguments, removes all cached bundles.
+- With a bundle name, removes only that bundle's cache.
+- `--dry-run`: Show what would be removed without deleting.
+
+```
+$ deadline bundle cache clean
+Removed 12 cached bundles (4.2 MB)
+
+$ deadline bundle cache clean blender-render
+Removed cached bundle: blender-render
+
+$ deadline bundle cache clean --dry-run
+Would remove 12 cached bundles (4.2 MB)
+```
+
+#### `deadline bundle cache update`
+
+Re-downloads any stale cached bundles from S3 by checking ETags.
+
+- With no arguments, checks all cached bundles.
+- With a bundle name, checks only that bundle.
+- Only re-downloads if the S3 ETag has changed.
+
+```
+$ deadline bundle cache update
+Checked 12 bundles: 2 updated, 10 up-to-date
+
+$ deadline bundle cache update blender-render
+blender-render: up-to-date
+```
 
 #### `deadline bundle upload <job_bundle_dir>`
 

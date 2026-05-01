@@ -543,6 +543,195 @@ def _get_queue_s3_settings(config):
     return queue.jobAttachmentSettings
 
 
+@cli_bundle.command(name="list")
+@click.option("--profile", help="The AWS profile to use.")
+@click.option("--farm-id", help="The farm to use.")
+@click.option("--queue-id", help="The queue to use.")
+@click.option(
+    "--output",
+    type=click.Choice(["text", "json"], case_sensitive=False),
+    default="text",
+    help="Output format. TEXT prints one name per line, JSON prints full details.",
+)
+@_handle_error
+def bundle_list(output, **args):
+    """
+    List job bundles available in the queue's S3 job-bundles folder.
+
+    Prints one bundle name per line by default, suitable for piping
+    to other commands like `deadline bundle download` or `deadline bundle submit`.
+    """
+    from ...job_bundle.repository import S3BundleRepository
+
+    config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
+    s3_settings = _get_queue_s3_settings(config)
+
+    repo = S3BundleRepository(
+        bucket_name=s3_settings.s3BucketName,
+        root_prefix=s3_settings.rootPrefix,
+    )
+
+    entries = repo.list_entries(repo.root_path())
+    bundles = [e for e in entries if e.is_bundle]
+
+    if output == "json":
+        result = [
+            {
+                "name": e.name,
+                "path": e.path,
+                "format": "archive" if e.is_archive else "folder",
+            }
+            for e in bundles
+        ]
+        click.echo(json.dumps(result, indent=2))
+    else:
+        for e in bundles:
+            click.echo(e.name)
+
+
+@cli_bundle.group(name="cache")
+@_handle_error
+def cli_bundle_cache():
+    """Manage the local cache of S3 job bundles."""
+
+
+@cli_bundle_cache.command(name="clean")
+@click.argument("bundle_name", required=False)
+@click.option("--dry-run", is_flag=True, help="Show what would be removed without deleting.")
+@_handle_error
+def bundle_cache_clean(bundle_name, dry_run):
+    """Remove cached S3 bundle archives from the local cache."""
+    from ...job_bundle.repository import _get_bundle_cache_dir
+
+    cache_root = _get_bundle_cache_dir()
+    if not os.path.isdir(cache_root):
+        click.echo("No bundle cache found.")
+        return
+
+    removed = 0
+    total_size = 0
+
+    for hash_dir in os.listdir(cache_root):
+        hash_path = os.path.join(cache_root, hash_dir)
+        if not os.path.isdir(hash_path):
+            continue
+        for name in os.listdir(hash_path):
+            bundle_path = os.path.join(hash_path, name)
+            if not os.path.isdir(bundle_path):
+                continue
+            if bundle_name and name != bundle_name:
+                continue
+            size = sum(
+                os.path.getsize(os.path.join(r, f))
+                for r, _, files in os.walk(bundle_path)
+                for f in files
+            )
+            if dry_run:
+                click.echo(f"Would remove: {name} ({size / 1024:.1f} KB)")
+            else:
+                shutil.rmtree(bundle_path)
+                # Remove parent hash dir if now empty
+                if not os.listdir(hash_path):
+                    os.rmdir(hash_path)
+                click.echo(f"Removed cached bundle: {name}")
+            removed += 1
+            total_size += size
+
+    if removed == 0:
+        click.echo(
+            "No cached bundles found."
+            if not bundle_name
+            else f"Bundle '{bundle_name}' not found in cache."
+        )
+    elif dry_run:
+        click.echo(f"Would remove {removed} cached bundle(s) ({total_size / (1024 * 1024):.1f} MB)")
+    else:
+        click.echo(f"Removed {removed} cached bundle(s) ({total_size / (1024 * 1024):.1f} MB)")
+        # Remove cache root if now empty
+        if os.path.isdir(cache_root) and not os.listdir(cache_root):
+            os.rmdir(cache_root)
+
+
+@cli_bundle_cache.command(name="update")
+@click.argument("bundle_name", required=False)
+@click.option("--profile", help="The AWS profile to use.")
+@click.option("--farm-id", help="The farm to use.")
+@click.option("--queue-id", help="The queue to use.")
+@_handle_error
+def bundle_cache_update(bundle_name, **args):
+    """Re-download any stale cached bundles from S3 by checking ETags."""
+    from ...job_bundle.repository import (
+        S3BundleRepository,
+        _get_bundle_cache_dir,
+        _read_cache_meta,
+    )
+
+    config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
+    s3_settings = _get_queue_s3_settings(config)
+
+    repo = S3BundleRepository(
+        bucket_name=s3_settings.s3BucketName,
+        root_prefix=s3_settings.rootPrefix,
+    )
+
+    # List remote bundles to match against cache
+    entries = repo.list_entries(repo.root_path())
+    archive_bundles = {e.name: e for e in entries if e.is_bundle and e.is_archive}
+
+    cache_root = _get_bundle_cache_dir()
+    if not os.path.isdir(cache_root):
+        click.echo("No bundle cache found.")
+        return
+
+    updated = 0
+    up_to_date = 0
+    checked = 0
+
+    for hash_dir in os.listdir(cache_root):
+        hash_path = os.path.join(cache_root, hash_dir)
+        if not os.path.isdir(hash_path):
+            continue
+        for name in os.listdir(hash_path):
+            bundle_path = os.path.join(hash_path, name)
+            if not os.path.isdir(bundle_path):
+                continue
+            if bundle_name and name != bundle_name:
+                continue
+
+            meta = _read_cache_meta(bundle_path)
+            if not meta:
+                continue
+
+            # Find the matching remote bundle
+            if name not in archive_bundles:
+                continue
+
+            checked += 1
+            entry = archive_bundles[name]
+
+            # Force a resolve which checks ETag and re-downloads if stale
+            result_path = repo.resolve_bundle(entry.path, "")
+            new_meta = _read_cache_meta(
+                os.path.dirname(result_path) if result_path != bundle_path else bundle_path
+            )
+
+            if new_meta and new_meta.get("etag") != meta.get("etag"):
+                click.echo(f"{name}: updated")
+                updated += 1
+            else:
+                click.echo(f"{name}: up-to-date")
+                up_to_date += 1
+
+    if checked == 0:
+        click.echo(
+            "No cached bundles found."
+            if not bundle_name
+            else f"Bundle '{bundle_name}' not found in cache."
+        )
+    else:
+        click.echo(f"Checked {checked} bundle(s): {updated} updated, {up_to_date} up-to-date")
+
+
 @cli_bundle.command(name="upload")
 @click.argument("job_bundle_dir")
 @click.option("--profile", help="The AWS profile to use.")

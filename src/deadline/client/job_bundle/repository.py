@@ -380,6 +380,7 @@ class S3BundleRepository:
                 is_bundle = child_prefix in bundle_prefixes
                 entries.append(BrowseEntry(name=name, path=child_path, is_bundle=is_bundle))
 
+        entries.sort(key=lambda e: e.name.lower())
         return entries
 
     def get_bundle_info(self, path: str) -> Optional[BundleInfo]:

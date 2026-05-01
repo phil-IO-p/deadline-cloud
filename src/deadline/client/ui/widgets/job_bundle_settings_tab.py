@@ -102,10 +102,14 @@ class JobBundleSettingsWidget(QWidget):
         except Exception:
             pass
 
+        # Get the job history directory for the current profile
+        job_history_dir = os.path.expanduser(get_setting("settings.job_history_dir"))
+
         browser = JobBundleBrowserDialog(
             local_root=default_dir,
             s3_bucket_name=s3_bucket,
             s3_root_prefix=s3_prefix,
+            job_history_dir=job_history_dir,
             parent=self,
         )
         if browser.exec_() != JobBundleBrowserDialog.Accepted or not browser.selected_path:
