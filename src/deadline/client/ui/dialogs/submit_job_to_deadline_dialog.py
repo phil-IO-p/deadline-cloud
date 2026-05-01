@@ -260,6 +260,9 @@ class SubmitJobToDeadlineDialog(QDialog):
         self.export_bundle_button = QPushButton(tr("Export bundle"))
         self.export_bundle_button.clicked.connect(self.on_export_bundle)
         self.button_box.addButton(self.export_bundle_button, QDialogButtonBox.AcceptRole)
+        self.share_bundle_button = QPushButton("Share")
+        self.share_bundle_button.clicked.connect(self.on_share_bundle)
+        self.button_box.addButton(self.share_bundle_button, QDialogButtonBox.AcceptRole)
 
         self.lyt.addWidget(self.button_box)
 
@@ -612,6 +615,124 @@ class SubmitJobToDeadlineDialog(QDialog):
                 ),
                 message,
             )  # type: ignore[call-arg]
+
+    def on_share_bundle(self):
+        """Archive the current bundle and upload it to the queue's S3 job-bundles folder."""
+        import io
+        import zipfile
+
+        import boto3
+
+        from ...config import get_setting
+        from ....job_attachments._aws.deadline import get_queue
+        from ...job_bundle.repository import (
+            S3_JOB_BUNDLES_PREFIX,
+            _extract_bundle_info,
+            _parse_template,
+        )
+
+        # First export the bundle locally
+        settings = self.job_settings_type()
+        self.shared_job_settings.update_settings(settings)
+        self.job_settings.update_settings(settings)
+        queue_parameters = self.shared_job_settings.get_parameters()
+        asset_references = self.job_attachments.get_asset_references()
+
+        try:
+            self.job_history_bundle_dir = create_job_history_bundle_dir(
+                self.submitter_info.submitter_name, settings.name
+            )
+            if self.show_host_requirements_tab:
+                self.on_create_job_bundle_callback(
+                    self,
+                    self.job_history_bundle_dir,
+                    settings,
+                    queue_parameters,
+                    asset_references,
+                    self.host_requirements.get_requirements(),
+                    purpose=JobBundlePurpose.EXPORT,
+                )
+            else:
+                self.on_create_job_bundle_callback(
+                    self,
+                    self.job_history_bundle_dir,
+                    settings,
+                    queue_parameters,
+                    asset_references,
+                    purpose=JobBundlePurpose.EXPORT,
+                )
+        except Exception as exc:
+            QMessageBox.critical(self, "Share failed", f"Failed to create bundle:\n{exc}")
+            return
+
+        # Get queue S3 settings
+        try:
+            farm_id = get_setting("defaults.farm_id")
+            queue_id = get_setting("defaults.queue_id")
+            queue_obj = get_queue(farm_id=farm_id, queue_id=queue_id)
+            if not queue_obj.jobAttachmentSettings:
+                QMessageBox.warning(
+                    self, "Share failed", "Queue does not have job attachment settings configured."
+                )
+                return
+            s3_settings = queue_obj.jobAttachmentSettings
+        except Exception as exc:
+            QMessageBox.critical(self, "Share failed", f"Failed to get queue settings:\n{exc}")
+            return
+
+        # Build S3 metadata from the template
+        bundle_metadata = {}
+        for tname in ("template.yaml", "template.json"):
+            tpath = os.path.join(self.job_history_bundle_dir, tname)
+            if os.path.isfile(tpath):
+                with open(tpath, encoding="utf-8") as f:
+                    template = _parse_template(f.read(), tname)
+                if template:
+                    info = _extract_bundle_info(template, self.job_history_bundle_dir)
+                    bundle_metadata["bundle-name"] = info.name[:256]
+                    if info.description:
+                        bundle_metadata["bundle-description"] = " ".join(info.description.split())[
+                            :512
+                        ]
+                    if info.step_names:
+                        bundle_metadata["bundle-steps"] = ",".join(info.step_names)[:512]
+                    if info.parameters:
+                        param_strs = [
+                            f"{p.get('name', '?')}:{p.get('type', '?')}" for p in info.parameters
+                        ]
+                        bundle_metadata["bundle-parameters"] = ",".join(param_strs)[:512]
+                break
+
+        # Archive and upload
+        try:
+            bundle_name = settings.name.replace(" ", "_").replace("/", "_")
+            prefix = f"{s3_settings.rootPrefix.rstrip('/')}/{S3_JOB_BUNDLES_PREFIX}"
+            s3_key = f"{prefix}/{bundle_name}.zip"
+
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for root, _dirs, files in os.walk(self.job_history_bundle_dir):
+                    for fname in files:
+                        local_path = os.path.join(root, fname)
+                        arcname = os.path.relpath(local_path, self.job_history_bundle_dir)
+                        zf.write(local_path, arcname)
+
+            buf.seek(0)
+            s3 = boto3.client("s3")
+            s3.upload_fileobj(
+                buf,
+                s3_settings.s3BucketName,
+                s3_key,
+                ExtraArgs={"Metadata": bundle_metadata} if bundle_metadata else None,
+            )
+
+            QMessageBox.information(
+                self,
+                "Shared to S3",
+                f"Bundle shared to:\ns3://{s3_settings.s3BucketName}/{s3_key}",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Share failed", f"Failed to upload bundle:\n{exc}")
 
     def save_job_parameters_to_job_bundle(
         self, job_bundle_dir: str, job_parameters: list[JobParameter]

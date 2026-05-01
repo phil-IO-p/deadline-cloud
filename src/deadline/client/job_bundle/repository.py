@@ -175,22 +175,43 @@ def _parse_template(raw: str, filename: str) -> Optional[dict]:
         return None
 
 
-def _extract_bundle_info(template: dict, path: str) -> BundleInfo:
-    """Extract BundleInfo from a parsed template dict."""
+def _extract_bundle_info(
+    template: dict, path: str, parameter_values: Optional[dict] = None
+) -> BundleInfo:
+    """Extract BundleInfo from a parsed template dict.
+    If parameter_values is provided, merges values into the parameter definitions."""
+    params = template.get("parameterDefinitions", [])
+
+    # Build a lookup from parameter_values file
+    pv_map: dict[str, str] = {}
+    if parameter_values:
+        for pv in parameter_values.get("parameterValues", []):
+            if "name" in pv and "value" in pv:
+                pv_map[pv["name"]] = pv["value"]
+
+    # Attach resolved value to each parameter: parameter_values > default > empty
+    for p in params:
+        name = p.get("name", "")
+        if name in pv_map:
+            p["_display_value"] = pv_map[name]
+        elif "default" in p:
+            p["_display_value"] = str(p["default"])
+
     return BundleInfo(
         path=path,
         name=template.get("name", os.path.basename(path.rstrip("/"))),
         description=template.get("description", ""),
         step_names=[s.get("name", "") for s in template.get("steps", [])],
-        parameters=template.get("parameterDefinitions", []),
+        parameters=params,
     )
 
 
 class LocalBundleRepository:
     """Browse job bundles on the local filesystem. Supports directories and archives."""
 
-    def __init__(self, root: str = ""):
+    def __init__(self, root: str = "", include_archives: bool = True):
         self._root = root or os.path.expanduser("~")
+        self._include_archives = include_archives
 
     def root_path(self) -> str:
         return self._root
@@ -206,15 +227,21 @@ class LocalBundleRepository:
             if entry.is_dir(follow_symlinks=False):
                 is_bundle = self._is_dir_bundle(entry.path)
                 entries.append(BrowseEntry(name=entry.name, path=entry.path, is_bundle=is_bundle))
-            elif entry.is_file(follow_symlinks=False) and _is_archive(entry.name):
-                entries.append(
-                    BrowseEntry(
-                        name=_strip_archive_ext(entry.name),
-                        path=entry.path,
-                        is_bundle=True,
-                        is_archive=True,
+            elif (
+                self._include_archives
+                and entry.is_file(follow_symlinks=False)
+                and _is_archive(entry.name)
+            ):
+                # Only show archives that actually contain a template
+                if _read_template_from_archive_path(entry.path) is not None:
+                    entries.append(
+                        BrowseEntry(
+                            name=_strip_archive_ext(entry.name),
+                            path=entry.path,
+                            is_bundle=True,
+                            is_archive=True,
+                        )
                     )
-                )
         return entries
 
     def get_bundle_info(self, path: str) -> Optional[BundleInfo]:
@@ -245,7 +272,21 @@ class LocalBundleRepository:
                     return None
                 template = _parse_template(raw, fname)
                 if template:
-                    return _extract_bundle_info(template, path)
+                    pv = self._read_parameter_values(path)
+                    return _extract_bundle_info(template, path, pv)
+        return None
+
+    @staticmethod
+    def _read_parameter_values(path: str) -> Optional[dict]:
+        """Read parameter_values.yaml or .json from a bundle directory."""
+        for pvname in ("parameter_values.yaml", "parameter_values.json"):
+            pvpath = os.path.join(path, pvname)
+            if os.path.isfile(pvpath):
+                try:
+                    with open(pvpath, encoding="utf-8") as f:
+                        return _parse_template(f.read(), pvname)
+                except OSError:
+                    pass
         return None
 
     def _get_archive_bundle_info(self, path: str) -> Optional[BundleInfo]:
@@ -541,14 +582,22 @@ class S3BundleRepository:
             pass
 
         if head:
+            # Check local cache validity
+            cache_valid = meta and head.get("ETag") == meta.get("etag")
+
             # Try S3 user metadata for preview (set by 'deadline bundle upload')
             s3_metadata = head.get("Metadata", {})
             info = _bundle_info_from_s3_metadata(s3_metadata, path)
             if info:
+                # If cache is valid, enrich with parameter values from the cached bundle
+                if cache_valid:
+                    cached_info = self._read_info_from_cache(cache_dir, path)
+                    if cached_info:
+                        info.parameters = cached_info.parameters
                 return info
 
-            # Check local cache validity
-            if meta and head.get("ETag") == meta.get("etag"):
+            # No S3 metadata — fall back to cache
+            if cache_valid:
                 return self._read_info_from_cache(cache_dir, path)
 
         # Cache miss or stale — download, cache, and parse
@@ -638,7 +687,8 @@ class S3BundleRepository:
                     return None
                 template = _parse_template(raw, fname)
                 if template:
-                    return _extract_bundle_info(template, original_path)
+                    pv = LocalBundleRepository._read_parameter_values(bundle_dir)
+                    return _extract_bundle_info(template, original_path, pv)
         return None
 
     @staticmethod

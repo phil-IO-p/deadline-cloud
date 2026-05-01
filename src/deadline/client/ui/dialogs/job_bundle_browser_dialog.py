@@ -71,7 +71,7 @@ class JobBundleBrowserDialog(QDialog):
         self.setMinimumSize(750, 550)
         self.resize(850, 620)
 
-        self._local_repo = LocalBundleRepository(root=local_root)
+        self._local_repo = LocalBundleRepository(root=local_root, include_archives=False)
         self._s3_repo: Optional[S3BundleRepository] = None
         self._s3_available = bool(s3_bucket_name)
         if s3_bucket_name:
@@ -82,7 +82,7 @@ class JobBundleBrowserDialog(QDialog):
         self._history_dir = job_history_dir
         self._history_repo: Optional[LocalBundleRepository] = None
         if job_history_dir and os.path.isdir(job_history_dir):
-            self._history_repo = LocalBundleRepository(root=job_history_dir)
+            self._history_repo = LocalBundleRepository(root=job_history_dir, include_archives=False)
 
         self._current_repo: BundleRepository = self._local_repo
         self._selected_path: Optional[str] = None
@@ -175,9 +175,7 @@ class JobBundleBrowserDialog(QDialog):
         self._preview_params = QLabel()
         self._preview_params.setWordWrap(True)
         preview_layout.addWidget(self._preview_params)
-
-        preview_layout.addStretch()
-        preview_layout.addWidget(self._preview_params)
+        preview_layout.addStretch(1)
 
         self._clear_preview()
 
@@ -401,7 +399,11 @@ class JobBundleBrowserDialog(QDialog):
             for p in info.parameters:
                 pname = p.get("name", "?")
                 ptype = p.get("type", "?")
-                lines.append(f"  \u2022 {pname} ({ptype})")
+                value = p.get("_display_value")
+                if value is not None:
+                    lines.append(f"  \u2022 {pname} ({ptype}) = {value}")
+                else:
+                    lines.append(f"  \u2022 {pname} ({ptype})")
             self._preview_params.setText("\n".join(lines))
             self._preview_params.setVisible(True)
         else:

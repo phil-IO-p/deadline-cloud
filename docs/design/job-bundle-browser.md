@@ -199,13 +199,17 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 **Right panel** — Preview (shown when a bundle is selected, scrollable):
 - **Name**: From the template's `name` field.
 - **Description**: From the template's `description` field, if present.
-- **Steps**: List of step names from the template.
-- **Parameters**: Name and type of each parameter definition.
+- **Steps**: List of step names from the template, in definition order.
+- **Parameters**: Name, type, and value of each parameter definition, in definition order. Values are resolved in priority order: `parameter_values.yaml`/`.json` > template `default` > blank. For S3 archives, values are available once the bundle is cached locally (first click caches, subsequent clicks show values).
 
 **Bottom bar**:
 - Radio toggle between Local, S3, and Job History sources. S3 option shows the bucket name from the queue and is disabled if the queue has no job attachment settings. Job History browses the `settings.job_history_dir` for the current AWS profile, showing previously submitted bundles.
 - Path display showing the current browse location.
 - Cancel and Select buttons. Select is enabled only when a valid bundle is highlighted.
+
+### Share Button
+
+The submitter dialog includes a "Share" button alongside the existing "Export bundle" and "Submit" buttons. Clicking "Share" archives the current job bundle and uploads it to the queue's S3 `job-bundles/` folder, making it available to the team via the browser's S3 source. The bundle name defaults to the job name. S3 user metadata (name, description, steps, parameters) is attached for zero-download preview.
 
 ### Lazy Loading
 
@@ -261,6 +265,7 @@ Bundled assets (scripts, data files) with relative paths resolve correctly again
 | `cli/_groups/bundle_group.py` | Add `deadline bundle list`, `deadline bundle upload`, `deadline bundle download`, and `deadline bundle cache` (clean/update) commands |
 | `ui/dialogs/job_bundle_browser_dialog.py` | **New file.** The browser dialog with filter, Local/S3/History sources. |
 | `ui/dialogs/deadline_config_dialog.py` | Add "Job bundle directory" picker to the settings dialog |
+| `ui/dialogs/submit_job_to_deadline_dialog.py` | Add "Share" button to upload the current bundle to S3 |
 | `ui/widgets/job_bundle_settings_tab.py` | `on_load_bundle` opens the new browser dialog instead of `QFileDialog` |
 | `ui/job_bundle_submitter.py` | `show_job_bundle_submitter` uses the new browser dialog when `browse=True`; handles archive extraction and S3 resolution |
 | `job_bundle/loader.py` | Add `is_job_bundle_dir(path) -> bool` helper for quick detection |
@@ -268,22 +273,30 @@ Bundled assets (scripts, data files) with relative paths resolve correctly again
 
 ### CLI Commands
 
-#### `deadline bundle list`
+#### `deadline bundle list [path]`
 
-Lists job bundles available in the queue's S3 `job-bundles/` folder.
+Lists job bundles in a local directory or the queue's S3 `job-bundles/` folder.
 
+- With no arguments, lists bundles in the configured default local directory (`settings.job_bundle_default_directory`, or home if not set). No AWS config needed.
+- With `path`, lists bundles in that local directory.
+- With `--s3`, lists bundles from the queue's S3 job-bundles folder (requires farm and queue).
 - Default output is one bundle name per line, suitable for piping.
-- `--output json`: JSON array with name, format (archive/folder), and S3 path.
-- `--profile`, `--farm-id`, `--queue-id`: Standard config overrides.
+- `--output json`: JSON array with name, format (archive/folder), and path.
 
 ```
 $ deadline bundle list
 blender-render
 maya-arnold
-monte_carlo_simulation
-simple_job
 
-$ deadline bundle list --output json
+$ deadline bundle list ./my-bundles
+simple-job
+
+$ deadline bundle list --s3
+blender-render
+maya-arnold
+monte_carlo_simulation
+
+$ deadline bundle list --s3 --output json
 [{"name": "blender-render", "path": "s3://bucket/prefix/job-bundles/blender-render.zip", "format": "archive"}, ...]
 
 $ deadline bundle list | head -1 | xargs deadline bundle gui-submit --browse

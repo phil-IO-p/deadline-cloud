@@ -544,6 +544,18 @@ def _get_queue_s3_settings(config):
 
 
 @cli_bundle.command(name="list")
+@click.argument("path", required=False)
+@click.option(
+    "--s3",
+    "use_s3",
+    is_flag=True,
+    help="List bundles from the queue's S3 job-bundles folder.",
+)
+@click.option(
+    "--no-archives",
+    is_flag=True,
+    help="Skip archive files when listing local bundles.",
+)
 @click.option("--profile", help="The AWS profile to use.")
 @click.option("--farm-id", help="The farm to use.")
 @click.option("--queue-id", help="The queue to use.")
@@ -554,22 +566,35 @@ def _get_queue_s3_settings(config):
     help="Output format. TEXT prints one name per line, JSON prints full details.",
 )
 @_handle_error
-def bundle_list(output, **args):
+def bundle_list(path, use_s3, no_archives, output, **args):
     """
-    List job bundles available in the queue's S3 job-bundles folder.
+    List job bundles.
 
-    Prints one bundle name per line by default, suitable for piping
-    to other commands like `deadline bundle download` or `deadline bundle submit`.
+    \b
+    With no arguments, lists bundles in the configured default local directory
+    (settings.job_bundle_default_directory, or home if not set).
+    With PATH, lists bundles in that local directory.
+    With --s3, lists bundles from the queue's S3 job-bundles folder.
     """
-    from ...job_bundle.repository import S3BundleRepository
+    from ...job_bundle.repository import LocalBundleRepository, S3BundleRepository
 
-    config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
-    s3_settings = _get_queue_s3_settings(config)
-
-    repo = S3BundleRepository(
-        bucket_name=s3_settings.s3BucketName,
-        root_prefix=s3_settings.rootPrefix,
-    )
+    if use_s3:
+        config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
+        s3_settings = _get_queue_s3_settings(config)
+        repo = S3BundleRepository(
+            bucket_name=s3_settings.s3BucketName,
+            root_prefix=s3_settings.rootPrefix,
+        )
+    else:
+        if path:
+            local_root = os.path.abspath(path)
+        else:
+            local_root = os.environ.get("DEADLINE_JOB_BUNDLE_DEFAULT_DIRECTORY", "")
+            if not local_root:
+                local_root = config_file.get_setting("settings.job_bundle_default_directory")
+            if not local_root:
+                local_root = os.path.expanduser("~")
+        repo = LocalBundleRepository(root=local_root, include_archives=not no_archives)
 
     entries = repo.list_entries(repo.root_path())
     bundles = [e for e in entries if e.is_bundle]
