@@ -227,6 +227,7 @@ def show_job_bundle_submitter(
         # Try to get the queue's S3 bucket for S3 browsing
         s3_bucket = ""
         s3_prefix = ""
+        s3_error = ""
         try:
             farm_id = get_setting("defaults.farm_id")
             queue_id = get_setting("defaults.queue_id")
@@ -237,8 +238,13 @@ def show_job_bundle_submitter(
                 if queue.jobAttachmentSettings:
                     s3_bucket = queue.jobAttachmentSettings.s3BucketName
                     s3_prefix = queue.jobAttachmentSettings.rootPrefix
-        except Exception:
+                else:
+                    s3_error = "Queue does not have job attachment settings"
+            else:
+                s3_error = "No farm or queue configured"
+        except Exception as e:
             logger.debug("Could not retrieve queue S3 settings for bundle browser", exc_info=True)
+            s3_error = str(e)
 
         # Get the job history directory for the current profile
         job_history_dir = os.path.expanduser(get_setting("settings.job_history_dir"))
@@ -247,6 +253,7 @@ def show_job_bundle_submitter(
             local_root=default_dir,
             s3_bucket_name=s3_bucket,
             s3_root_prefix=s3_prefix,
+            s3_error=s3_error,
             job_history_dir=job_history_dir,
             parent=parent,
         )

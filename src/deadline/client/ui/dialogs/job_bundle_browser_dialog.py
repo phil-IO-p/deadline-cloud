@@ -63,6 +63,7 @@ class JobBundleBrowserDialog(QDialog):
         local_root: str = "",
         s3_bucket_name: str = "",
         s3_root_prefix: str = "",
+        s3_error: str = "",
         job_history_dir: str = "",
         parent: Optional[QWidget] = None,
     ):
@@ -73,6 +74,7 @@ class JobBundleBrowserDialog(QDialog):
 
         self._local_repo = LocalBundleRepository(root=local_root, include_archives=False)
         self._s3_repo: Optional[S3BundleRepository] = None
+        self._s3_error = s3_error
         self._s3_available = bool(s3_bucket_name)
         if s3_bucket_name:
             self._s3_repo = S3BundleRepository(
@@ -144,6 +146,7 @@ class JobBundleBrowserDialog(QDialog):
         self._tree.setEditTriggers(QTreeView.NoEditTriggers)
         self._tree.expanded.connect(self._on_expanded)
         self._tree.clicked.connect(self._on_clicked)
+        self._tree.doubleClicked.connect(self._on_double_clicked)
         self._tree.selectionModel().currentChanged.connect(self._on_selection_changed)
         left_layout.addWidget(self._tree)
 
@@ -193,12 +196,16 @@ class JobBundleBrowserDialog(QDialog):
         source_row = QHBoxLayout()
         source_label = QLabel(tr("Source:"))
         source_row.addWidget(source_label)
-        self._radio_s3 = QRadioButton(
-            tr("S3 ({bucket})").format(
-                bucket=self._s3_repo._bucket if self._s3_repo else tr("not configured")
-            )
-        )
+        if self._s3_repo:
+            s3_label = f"S3 ({self._s3_repo._bucket})"
+        elif self._s3_error:
+            s3_label = "\u26a0 S3"
+        else:
+            s3_label = "S3 (not configured)"
+        self._radio_s3 = QRadioButton(s3_label)
         self._radio_s3.setEnabled(self._s3_available)
+        if not self._s3_available and self._s3_error:
+            self._radio_s3.setToolTip(f"S3 unavailable: {self._s3_error}")
         self._radio_s3.toggled.connect(self._on_source_changed)
         source_row.addWidget(self._radio_s3)
         self._radio_history = QRadioButton(tr("History"))
@@ -245,7 +252,12 @@ class JobBundleBrowserDialog(QDialog):
         self._model.setHorizontalHeaderLabels([tr("Name")])
         root_path = self._current_repo.root_path()
         self._path_display.setText(root_path)
-        entries = self._current_repo.list_entries(root_path)
+        try:
+            entries = self._current_repo.list_entries(root_path)
+        except Exception as e:
+            logger.warning("Failed to list bundles: %s", e, exc_info=True)
+            self._show_error_preview(f"Failed to list bundles:\n{e}")
+            entries = []
         root = self._model.invisibleRootItem()
         for entry in entries:
             self._add_entry_item(root, entry)
@@ -282,12 +294,25 @@ class JobBundleBrowserDialog(QDialog):
         item.setData(True, ROLE_LOADED)
         item.removeRows(0, item.rowCount())
         path = item.data(ROLE_PATH)
-        entries = self._current_repo.list_entries(path)
+        try:
+            entries = self._current_repo.list_entries(path)
+        except Exception as e:
+            logger.warning("Failed to list bundles in %s: %s", path, e, exc_info=True)
+            error_item = QStandardItem(f"\u26a0 Error: {e}")
+            error_item.setEnabled(False)
+            item.appendRow(error_item)
+            return
         for entry in entries:
             self._add_entry_item(item, entry)
 
     def _on_clicked(self, proxy_index: QModelIndex):
         self._update_selection(proxy_index)
+
+    def _on_double_clicked(self, proxy_index: QModelIndex):
+        item = self._source_item(proxy_index)
+        if item and item.data(ROLE_IS_BUNDLE):
+            self._update_selection(proxy_index)
+            self.accept()
 
     def _on_selection_changed(self, current: QModelIndex, previous: QModelIndex):
         self._update_selection(current)
@@ -314,7 +339,7 @@ class JobBundleBrowserDialog(QDialog):
             self._selected_is_s3 = self._radio_s3.isChecked()
             self._selected_is_archive = bool(item.data(ROLE_IS_ARCHIVE))
             self._select_button.setEnabled(True)
-            self._load_preview(path)
+            self._load_preview(path, item)
         else:
             self._selected_path = None
             self._select_button.setEnabled(False)
@@ -369,10 +394,23 @@ class JobBundleBrowserDialog(QDialog):
 
     # ── Preview ──────────────────────────────────────────────────
 
-    def _load_preview(self, path: str):
-        info = self._current_repo.get_bundle_info(path)
+    def _load_preview(self, path: str, item: Optional[QStandardItem] = None):
+        try:
+            info = self._current_repo.get_bundle_info(path)
+        except Exception as e:
+            logger.warning("Failed to load bundle info for %s: %s", path, e, exc_info=True)
+            self._show_error_preview(f"Failed to load bundle info:\n{e}")
+            if item:
+                self._mark_item_error(item)
+            self._select_button.setEnabled(False)
+            return
         if not info:
-            self._clear_preview()
+            self._show_error_preview(
+                "Could not read bundle template.\nThe template may be missing or malformed."
+            )
+            if item:
+                self._mark_item_error(item)
+            self._select_button.setEnabled(False)
             return
 
         self._preview_name.setText(info.name)
@@ -414,6 +452,28 @@ class JobBundleBrowserDialog(QDialog):
         self._preview_name.setText(tr("Select a job bundle to see details"))
         self._preview_name.setStyleSheet("font-weight: bold; font-size: 14px; color: gray;")
         self._preview_desc.setVisible(False)
+        self._preview_steps_label.setVisible(False)
+        self._preview_steps.setVisible(False)
+        self._preview_params_label.setVisible(False)
+        self._preview_params.setVisible(False)
+
+    def _mark_item_error(self, item: QStandardItem) -> None:
+        """Replace the bundle/folder icon with a warning icon."""
+        text = item.text()
+        # Remove existing icon prefix
+        for prefix in ("\U0001f4e6 ", "\U0001f4c1 ", "\u26a0 "):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+        item.setText(f"\u26a0 {text}")
+
+    def _show_error_preview(self, message: str):
+        """Show an error message in the preview panel."""
+        self._preview_name.setText("\u26a0 Error")
+        self._preview_name.setStyleSheet("font-weight: bold; font-size: 14px; color: red;")
+        self._preview_name.setVisible(True)
+        self._preview_desc.setText(message)
+        self._preview_desc.setVisible(True)
         self._preview_steps_label.setVisible(False)
         self._preview_steps.setVisible(False)
         self._preview_params_label.setVisible(False)

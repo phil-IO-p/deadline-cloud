@@ -277,6 +277,7 @@ class SubmitJobToDeadlineDialog(QDialog):
         enable = api_available and farm_configured and queue_configured and queue_valid
 
         self.submit_button.setEnabled(enable)
+        self.share_bundle_button.setEnabled(api_available and farm_configured and queue_configured)
 
         if not enable:
             issues = []
@@ -722,6 +723,10 @@ class SubmitJobToDeadlineDialog(QDialog):
                 lambda m: str(param_value_map.get(m.group(1), m.group(0))),
                 settings.name,
             )
+            if not resolved_name.strip():
+                resolved_name = os.path.basename(
+                    settings.input_job_bundle_dir
+                )  # fallback to dir name
             bundle_metadata["bundle-name"] = resolved_name[:256]
 
             bundle_name = resolved_name.replace(" ", "_").replace("/", "_")

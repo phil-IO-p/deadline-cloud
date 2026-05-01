@@ -22,6 +22,16 @@ from botocore.exceptions import ClientError
 from ... import api
 from ...config import config_file
 from ...dataclasses import SubmitterInfo
+from ...job_bundle.loader import is_job_bundle_dir
+from ...job_bundle.repository import (
+    LocalBundleRepository,
+    S3BundleRepository,
+    S3_JOB_BUNDLES_PREFIX,
+    _extract_bundle_info,
+    _get_bundle_cache_dir,
+    _parse_template,
+    _read_cache_meta,
+)
 from ....job_attachments.exceptions import (
     AssetSyncError,
     AssetSyncCancelledError,
@@ -576,7 +586,6 @@ def bundle_list(path, use_s3, no_archives, output, **args):
     With PATH, lists bundles in that local directory.
     With --s3, lists bundles from the queue's S3 job-bundles folder.
     """
-    from ...job_bundle.repository import LocalBundleRepository, S3BundleRepository
 
     if use_s3:
         config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
@@ -626,7 +635,6 @@ def cli_bundle_cache():
 @_handle_error
 def bundle_cache_clean(bundle_name, dry_run):
     """Remove cached S3 bundle archives from the local cache."""
-    from ...job_bundle.repository import _get_bundle_cache_dir
 
     cache_root = _get_bundle_cache_dir()
     if not os.path.isdir(cache_root):
@@ -685,11 +693,6 @@ def bundle_cache_clean(bundle_name, dry_run):
 @_handle_error
 def bundle_cache_update(bundle_name, **args):
     """Re-download any stale cached bundles from S3 by checking ETags."""
-    from ...job_bundle.repository import (
-        S3BundleRepository,
-        _get_bundle_cache_dir,
-        _read_cache_meta,
-    )
 
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
     s3_settings = _get_queue_s3_settings(config)
@@ -789,14 +792,6 @@ def bundle_upload(job_bundle_dir, name, archive_format, no_archive, **args):
     import zipfile
     import tarfile
     import io
-
-    from ...job_bundle.loader import is_job_bundle_dir
-    from ...job_bundle.repository import (
-        S3_JOB_BUNDLES_PREFIX,
-        LocalBundleRepository,
-        _extract_bundle_info,
-        _parse_template,
-    )
 
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
     s3_settings = _get_queue_s3_settings(config)
@@ -903,9 +898,6 @@ def bundle_download(bundle_name, output_dir, **args):
     BUNDLE_NAME is the name of the bundle (e.g. 'blender-render').
     The command will look for both archive and folder formats.
     """
-    from ...job_bundle.repository import (
-        S3BundleRepository,
-    )
 
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
     s3_settings = _get_queue_s3_settings(config)

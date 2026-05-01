@@ -40,14 +40,46 @@ def _strip_archive_ext(name: str) -> str:
     return name
 
 
+def _safe_zip_extract(zf: zipfile.ZipFile, dest_dir: str) -> None:
+    """Extract a zip file, rejecting archives with entries that would escape dest_dir."""
+    dest = os.path.realpath(dest_dir)
+    for member in zf.namelist():
+        # Reject absolute paths
+        if os.path.isabs(member):
+            raise ValueError(f"Zip contains absolute path: {member}")
+        # Reject path traversal
+        target = os.path.normpath(os.path.join(dest, member))
+        if not (target.startswith(dest + os.sep) or target == dest):
+            raise ValueError(f"Zip entry would extract outside target directory: {member}")
+    zf.extractall(dest_dir)
+
+
+def _safe_tar_extract(tf: tarfile.TarFile, dest_dir: str) -> None:
+    """Extract a tar file safely, rejecting entries that would escape dest_dir."""
+    dest = os.path.realpath(dest_dir)
+    for member in tf.getmembers():
+        if member.issym() or member.islnk():
+            raise ValueError(f"Tar contains symlink or hard link: {member.name}")
+        if os.path.isabs(member.name):
+            raise ValueError(f"Tar contains absolute path: {member.name}")
+        target = os.path.normpath(os.path.join(dest, member.name))
+        if not (target.startswith(dest + os.sep) or target == dest):
+            raise ValueError(f"Tar entry would extract outside target directory: {member.name}")
+    try:
+        tf.extractall(dest_dir, filter="data")
+    except TypeError:
+        # Python < 3.12 doesn't support filter=
+        tf.extractall(dest_dir)
+
+
 def _extract_archive(archive_path: str, dest_dir: str) -> None:
     """Extract an archive to dest_dir."""
     if archive_path.endswith(".zip"):
         with zipfile.ZipFile(archive_path, "r") as zf:
-            zf.extractall(dest_dir)
+            _safe_zip_extract(zf, dest_dir)
     else:
         with tarfile.open(archive_path, "r:*") as tf:
-            tf.extractall(dest_dir, filter="data")
+            _safe_tar_extract(tf, dest_dir)
 
 
 def _read_template_from_archive_path(archive_path: str) -> Optional[tuple[str, str]]:
@@ -122,10 +154,10 @@ def _extract_archive_from_bytes(data: bytes, filename: str, dest_dir: str) -> No
     """Extract an archive from bytes in memory to dest_dir."""
     if filename.endswith(".zip"):
         with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
-            zf.extractall(dest_dir)
+            _safe_zip_extract(zf, dest_dir)
     else:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tf:
-            tf.extractall(dest_dir, filter="data")
+            _safe_tar_extract(tf, dest_dir)
 
 
 @dataclass
@@ -430,7 +462,7 @@ class S3BundleRepository:
                         )
         except Exception:
             logger.warning("Failed to list S3 prefix %s", prefix, exc_info=True)
-            return entries
+            raise
 
         # Batch-detect which folders are bundles with a single recursive listing
         # instead of per-folder head_object calls

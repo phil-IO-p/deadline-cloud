@@ -30,7 +30,7 @@ Job bundles can be either:
 - **Directories** — a folder containing `template.yaml` or `template.json` at the root, plus any scripts, data files, and `asset_references.yaml`.
 - **Archives** — a `.zip`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tar.xz`, or `.tar` file containing a job bundle. The template can be at the archive root or inside a single wrapper directory.
 
-Both formats are supported for both local and S3 browsing. Archives are extracted to a local directory before submission.
+Both formats are supported for both local and S3 browsing. Archives are extracted to a local directory before submission. If an archive contains a single top-level wrapper directory (e.g. `my-bundle/template.yaml` instead of `template.yaml` at the root), the wrapper is detected and the inner directory is used as the bundle path.
 
 ### Backend Abstraction
 
@@ -147,7 +147,7 @@ The preview priority chain for S3 archives:
 2. **Local cache** if ETag matches → read template from disk
 3. **Download archive** → parse template, populate cache (fallback for archives not uploaded via the CLI)
 
-S3 user metadata has a 2KB total limit, which is sufficient for typical bundle metadata. Values are truncated to stay within limits.
+S3 user metadata has a 2KB total limit, which is sufficient for typical bundle metadata. Per-field limits: `bundle-name` is truncated to 256 characters, `bundle-description`, `bundle-steps`, and `bundle-parameters` are each truncated to 512 characters.
 
 ### Detection: What Is a Job Bundle?
 
@@ -157,7 +157,7 @@ S3 user metadata has a 2KB total limit, which is sufficient for typical bundle m
 For `list_entries`, detection is kept fast:
 
 - **Local directories**: stat check for template file existence (no parsing).
-- **Local archives**: matched by file extension, then validated by checking for a template inside the archive. This prevents random zip files from appearing as bundles. Archive scanning can be disabled via `include_archives=False` on `LocalBundleRepository` (used by the browser for Local/History sources, and via `--no-archives` in the CLI).
+- **Local archives**: matched by file extension, then validated by checking for a template inside the archive. This prevents random zip files from appearing as bundles. Archive scanning can be disabled via `include_archives=False` on `LocalBundleRepository` (used by the browser for Local/History sources, and via `--no-archives` in the CLI). The browser dialog disables local archives because the primary use case for archives is S3-shared bundles — local users work with directory bundles directly.
 - **S3 folders**: detected via batch recursive listing — a single `list_objects_v2` (without delimiter) returns all keys under the parent prefix, and we check in-memory which child prefixes contain a template file. This replaces per-folder `head_object` calls, reducing N+1 API calls to 2 (one delimited list + one recursive list).
 - **S3 archives**: matched by key extension only (no API call).
 
@@ -203,13 +203,15 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 - **Parameters**: Name, type, and value of each parameter definition, in definition order. Values are resolved in priority order: `parameter_values.yaml`/`.json` > template `default` > blank. For S3 archives, values are available once the bundle is cached locally (first click caches, subsequent clicks show values).
 
 **Bottom bar**:
-- Radio toggle between Local, S3, and Job History sources. S3 option shows the bucket name from the queue and is disabled if the queue has no job attachment settings. Job History browses the `settings.job_history_dir` for the current AWS profile, showing previously submitted bundles.
+- Radio toggle between Local, S3, and Job History sources. S3 is selected by default when available; otherwise Local is selected. S3 option shows the bucket name from the queue and is disabled if the queue has no job attachment settings or S3 access fails (with a tooltip explaining why). Job History browses the `settings.job_history_dir` for the current AWS profile, showing previously submitted bundles; it is disabled if the job history directory does not exist on disk.
 - Path display showing the current browse location.
 - Cancel and Select buttons. Select is enabled only when a valid bundle is highlighted.
 
 ### Share Button
 
-The submitter dialog includes a "Share" button alongside the existing "Export bundle" and "Submit" buttons. Clicking "Share" archives the current job bundle and uploads it to the queue's S3 `job-bundles/` folder, making it available to the team via the browser's S3 source. The bundle name defaults to the job name, with `{{Param.X}}` references resolved using current parameter values. S3 user metadata (name, description, steps, parameters) is attached for zero-download preview.
+The submitter dialog includes a "Share" button alongside the existing "Export bundle" and "Submit" buttons. Clicking "Share" archives the current job bundle and uploads it to the queue's S3 `job-bundles/` folder, making it available to the team via the browser's S3 source. The bundle name defaults to the job name, with `{{Param.X}}` references resolved using current parameter values. Spaces and slashes in the resolved name are replaced with underscores. S3 user metadata (name, description, steps, parameters) is attached for zero-download preview.
+
+Share is enabled when the API is available and a farm and queue are configured — it does not require valid queue parameters (unlike Submit), since sharing only needs S3 access, not a runnable job configuration.
 
 Note: uploading a bundle with the same name as an existing one silently overwrites it in S3.
 
@@ -238,7 +240,7 @@ This setting is also exposed in the Deadline Cloud settings dialog (Settings →
 
 ### CLI Integration
 
-The `--browse` flag on `deadline bundle gui-submit` opens this new dialog instead of `QFileDialog.getExistingDirectory()`. No new flags needed.
+The `--browse` flag on `deadline bundle gui-submit` opens this new dialog instead of `QFileDialog.getExistingDirectory()`. No new flags needed. When `--browse` is used, the browser dialog opens before the submitter dialog. If the user cancels the browser, the command exits. Additionally, a "Load Bundle" button is added to the submitter dialog's button bar, allowing users to switch bundles mid-session by reopening the browser.
 
 The "Load a different job bundle" button inside the submitter dialog (`JobBundleSettingsWidget.on_load_bundle`) also uses the new browser dialog, giving users the same browsing experience when switching bundles mid-session.
 
@@ -250,7 +252,7 @@ After the user selects a bundle in the browser, it must be resolved to a local d
 |---|---|---|---|
 | Local | Directory | Used directly (no copy) | None needed |
 | Local | Archive | Extracted to temp dir | atexit cleanup |
-| S3 | Directory (folder) | Metadata files only (template, parameters, asset_references, hooks) | atexit cleanup |
+| S3 | Directory (folder) | Metadata files only (`template.yaml`/`.json`, `parameter_values.yaml`/`.json`, `asset_references.yaml`/`.json`, `hooks.yaml`/`.json`) | atexit cleanup |
 | S3 | Archive | Downloaded, cached with ETag, extracted to cache dir | Persists in cache |
 
 The CLI `deadline bundle download` command uses a separate `download_full_bundle()` path that downloads all files (including scripts and data), with a 50 MB size limit for folder bundles. Bundles larger than this should be uploaded as archives instead.
@@ -393,6 +395,23 @@ Downloaded bundle to: ./blender-render
 $ deadline bundle download blender-render -o /tmp/bundles
 Downloaded bundle to: /tmp/bundles/blender-render
 ```
+
+### Error Handling
+
+Errors are displayed inline rather than as popup dialogs:
+
+- **S3 unavailable** (no farm/queue, no JA settings, auth failure): The S3 radio button shows `⚠ S3` and is disabled. Hovering shows the reason in a tooltip. The label distinguishes "not configured" (expected) from errors (⚠ icon).
+- **Listing failure** (network error, permissions): The preview panel shows "⚠ Error" in red with the error message.
+- **Expand failure** (subfolder listing fails): A disabled `⚠ Error: {message}` entry appears in the tree under that folder.
+- **Preview failure** (malformed template, missing fields): The preview panel shows "⚠ Error" with "Could not read bundle template" and the tree entry icon changes from 📦 to ⚠.
+- **Double-click**: Double-clicking a bundle selects it and accepts the dialog. Double-clicking a folder does nothing.
+
+### Archive Safety
+
+Archives are validated before extraction to prevent path traversal and symlink attacks:
+
+- **Zip**: All entry paths are checked for absolute paths and `../` traversal before any extraction occurs. The entire archive is rejected if any entry is suspicious.
+- **Tar**: Symlinks and hard links are rejected. Absolute paths and path traversal are checked. Python 3.12+ uses `filter="data"` for additional safety; older versions rely on the manual validation.
 
 ### S3 Considerations
 

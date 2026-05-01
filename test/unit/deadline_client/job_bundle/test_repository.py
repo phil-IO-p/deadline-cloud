@@ -2,6 +2,7 @@
 
 """Tests for the job bundle repository module."""
 
+import io
 import json
 import os
 import tarfile
@@ -11,6 +12,7 @@ import yaml
 
 from deadline.client.job_bundle.repository import (
     LocalBundleRepository,
+    _bundle_info_from_s3_metadata,
     _extract_bundle_info,
     _is_archive,
     _parse_template,
@@ -64,6 +66,104 @@ class TestExtractBundleInfo:
         assert info.step_names == ["OnlyStep"]
         assert info.parameters == []
 
+    def test_parameter_values_from_file(self):
+        template = {
+            "name": "Job",
+            "steps": [],
+            "parameterDefinitions": [
+                {"name": "Frames", "type": "STRING", "default": "1-10"},
+                {"name": "Output", "type": "PATH"},
+            ],
+        }
+        pv = {"parameterValues": [{"name": "Frames", "value": "1-50"}]}
+        info = _extract_bundle_info(template, "/path", pv)
+        frames = next(p for p in info.parameters if p["name"] == "Frames")
+        output = next(p for p in info.parameters if p["name"] == "Output")
+        assert frames["_display_value"] == "1-50"  # from parameter_values
+        assert "_display_value" not in output  # no value or default
+
+    def test_parameter_default_used_when_no_value(self):
+        template = {
+            "name": "Job",
+            "steps": [],
+            "parameterDefinitions": [
+                {"name": "Frames", "type": "STRING", "default": "1-10"},
+            ],
+        }
+        info = _extract_bundle_info(template, "/path")
+        frames = info.parameters[0]
+        assert frames["_display_value"] == "1-10"
+
+    def test_name_resolution_with_param_reference(self):
+        template = {
+            "name": "Render {{Param.SceneName}}",
+            "steps": [],
+            "parameterDefinitions": [
+                {"name": "SceneName", "type": "STRING", "default": "my_scene"},
+            ],
+        }
+        info = _extract_bundle_info(template, "/path")
+        assert info.name == "Render my_scene"
+
+    def test_name_resolution_with_parameter_values(self):
+        template = {
+            "name": "{{Param.JobName}}",
+            "steps": [],
+            "parameterDefinitions": [
+                {"name": "JobName", "type": "STRING", "default": "Default Name"},
+            ],
+        }
+        pv = {"parameterValues": [{"name": "JobName", "value": "Custom Name"}]}
+        info = _extract_bundle_info(template, "/path", pv)
+        assert info.name == "Custom Name"
+
+    def test_name_resolution_unresolved_param(self):
+        template = {
+            "name": "{{Param.Missing}}",
+            "steps": [],
+            "parameterDefinitions": [],
+        }
+        info = _extract_bundle_info(template, "/path")
+        assert info.name == "{{Param.Missing}}"
+
+    def test_name_resolution_param_from_pv_not_in_definitions(self):
+        """Parameter values can contain params not in parameterDefinitions (e.g. queue params)."""
+        template = {
+            "name": "{{Param.JobName}}",
+            "steps": [],
+            "parameterDefinitions": [],
+        }
+        pv = {"parameterValues": [{"name": "JobName", "value": "From PV"}]}
+        info = _extract_bundle_info(template, "/path", pv)
+        assert info.name == "From PV"
+
+
+class TestBundleInfoFromS3Metadata:
+    def test_full_metadata(self):
+        metadata = {
+            "bundle-name": "My Bundle",
+            "bundle-description": "A description",
+            "bundle-steps": "Step1,Step2",
+            "bundle-parameters": "Frames:STRING,Output:PATH",
+        }
+        info = _bundle_info_from_s3_metadata(metadata, "s3://bucket/key")
+        assert info.name == "My Bundle"
+        assert info.description == "A description"
+        assert info.step_names == ["Step1", "Step2"]
+        assert len(info.parameters) == 2
+        assert info.parameters[0] == {"name": "Frames", "type": "STRING"}
+        assert info.parameters[1] == {"name": "Output", "type": "PATH"}
+
+    def test_missing_name_returns_none(self):
+        info = _bundle_info_from_s3_metadata({}, "s3://bucket/key")
+        assert info is None
+
+    def test_name_only(self):
+        info = _bundle_info_from_s3_metadata({"bundle-name": "Simple"}, "s3://bucket/key")
+        assert info.name == "Simple"
+        assert info.step_names == []
+        assert info.parameters == []
+
 
 class TestArchiveHelpers:
     def test_is_archive(self):
@@ -86,7 +186,6 @@ class TestArchiveHelpers:
 
 class TestReadTemplateFromArchive:
     def _make_zip(self, tmp_path, contents: dict[str, str]) -> str:
-        """Create a zip with the given {filename: content} entries."""
         zip_path = str(tmp_path / "bundle.zip")
         with zipfile.ZipFile(zip_path, "w") as zf:
             for name, data in contents.items():
@@ -94,12 +193,9 @@ class TestReadTemplateFromArchive:
         return zip_path
 
     def _make_tar_gz(self, tmp_path, contents: dict[str, str]) -> str:
-        """Create a tar.gz with the given {filename: content} entries."""
         tar_path = str(tmp_path / "bundle.tar.gz")
         with tarfile.open(tar_path, "w:gz") as tf:
             for name, data in contents.items():
-                import io
-
                 info = tarfile.TarInfo(name=name)
                 encoded = data.encode("utf-8")
                 info.size = len(encoded)
@@ -191,38 +287,44 @@ class TestLocalBundleRepository:
         dir_entry = next(e for e in entries if e.name == "regular-dir")
         assert dir_entry.is_bundle is False
 
-    def test_list_entries_with_archives(self, tmp_path):
-        # Create a zip archive bundle
+    def test_list_entries_with_valid_archive(self, tmp_path):
         zip_path = tmp_path / "render-job.zip"
         with zipfile.ZipFile(str(zip_path), "w") as zf:
             zf.writestr("template.yaml", "name: Render\nsteps:\n- name: S1\n")
 
-        # Create a tar.gz archive bundle
-        tar_path = tmp_path / "process-job.tar.gz"
-        with tarfile.open(str(tar_path), "w:gz") as tf:
-            import io
-
-            data = b"name: Process\nsteps:\n- name: S1\n"
-            info = tarfile.TarInfo(name="template.yaml")
-            info.size = len(data)
-            tf.addfile(info, io.BytesIO(data))
-
-        # Create a regular directory bundle
-        dir_bundle = tmp_path / "dir-bundle"
-        dir_bundle.mkdir()
-        (dir_bundle / "template.yaml").write_text("name: Dir\nsteps: []\n")
-
         repo = LocalBundleRepository(root=str(tmp_path))
         entries = repo.list_entries(str(tmp_path))
 
-        assert len(entries) == 3
         archive_entries = [e for e in entries if e.is_archive]
-        assert len(archive_entries) == 2
-        archive_names = {e.name for e in archive_entries}
-        assert "render-job" in archive_names
-        assert "process-job" in archive_names
-        for e in archive_entries:
-            assert e.is_bundle is True
+        assert len(archive_entries) == 1
+        assert archive_entries[0].name == "render-job"
+        assert archive_entries[0].is_bundle is True
+
+    def test_list_entries_invalid_archive_excluded(self, tmp_path):
+        """A zip without a template should not appear as a bundle."""
+        zip_path = tmp_path / "random.zip"
+        with zipfile.ZipFile(str(zip_path), "w") as zf:
+            zf.writestr("readme.txt", "not a bundle")
+
+        repo = LocalBundleRepository(root=str(tmp_path))
+        entries = repo.list_entries(str(tmp_path))
+        assert len(entries) == 0
+
+    def test_list_entries_include_archives_false(self, tmp_path):
+        """With include_archives=False, archives are skipped entirely."""
+        zip_path = tmp_path / "bundle.zip"
+        with zipfile.ZipFile(str(zip_path), "w") as zf:
+            zf.writestr("template.yaml", "name: Zipped\nsteps: []\n")
+
+        bundle_dir = tmp_path / "dir-bundle"
+        bundle_dir.mkdir()
+        (bundle_dir / "template.yaml").write_text("name: Dir\nsteps: []\n")
+
+        repo = LocalBundleRepository(root=str(tmp_path), include_archives=False)
+        entries = repo.list_entries(str(tmp_path))
+
+        assert len(entries) == 1
+        assert entries[0].name == "dir-bundle"
 
     def test_list_entries_nonexistent_path(self):
         repo = LocalBundleRepository()
@@ -252,6 +354,40 @@ class TestLocalBundleRepository:
         assert info.description == "A test"
         assert info.step_names == ["Render"]
         assert len(info.parameters) == 1
+
+    def test_get_bundle_info_with_parameter_values(self, tmp_path):
+        bundle_dir = tmp_path / "pv-bundle"
+        bundle_dir.mkdir()
+        (bundle_dir / "template.yaml").write_text(
+            yaml.dump(
+                {
+                    "name": "{{Param.JobName}}",
+                    "steps": [{"name": "Run"}],
+                    "parameterDefinitions": [
+                        {"name": "JobName", "type": "STRING", "default": "Default"},
+                        {"name": "Frames", "type": "STRING"},
+                    ],
+                }
+            )
+        )
+        (bundle_dir / "parameter_values.yaml").write_text(
+            yaml.dump(
+                {
+                    "parameterValues": [
+                        {"name": "JobName", "value": "My Custom Job"},
+                        {"name": "Frames", "value": "1-100"},
+                    ]
+                }
+            )
+        )
+
+        repo = LocalBundleRepository(root=str(tmp_path))
+        info = repo.get_bundle_info(str(bundle_dir))
+
+        assert info is not None
+        assert info.name == "My Custom Job"
+        frames = next(p for p in info.parameters if p["name"] == "Frames")
+        assert frames["_display_value"] == "1-100"
 
     def test_get_bundle_info_archive(self, tmp_path):
         zip_path = tmp_path / "my-job.zip"
@@ -286,7 +422,6 @@ class TestLocalBundleRepository:
         assert info is None
 
     def test_extract_bundle_flat(self, tmp_path):
-        """Test extracting a zip where template is at the root."""
         zip_path = tmp_path / "flat.zip"
         with zipfile.ZipFile(str(zip_path), "w") as zf:
             zf.writestr("template.yaml", "name: Flat\nsteps: []\n")
@@ -301,7 +436,6 @@ class TestLocalBundleRepository:
         assert os.path.isfile(os.path.join(result, "scripts", "run.sh"))
 
     def test_extract_bundle_wrapped(self, tmp_path):
-        """Test extracting a zip where contents are in a single subdirectory."""
         zip_path = tmp_path / "wrapped.zip"
         with zipfile.ZipFile(str(zip_path), "w") as zf:
             zf.writestr("my-bundle/template.yaml", "name: Wrapped\nsteps: []\n")
@@ -327,3 +461,29 @@ class TestLocalBundleRepository:
         assert len(entries) == 1
         assert entries[0].is_bundle is True
         assert entries[0].name == "my-job"
+
+    def test_read_parameter_values_yaml(self, tmp_path):
+        bundle_dir = tmp_path / "bundle"
+        bundle_dir.mkdir()
+        (bundle_dir / "parameter_values.yaml").write_text(
+            yaml.dump({"parameterValues": [{"name": "X", "value": "1"}]})
+        )
+        result = LocalBundleRepository._read_parameter_values(str(bundle_dir))
+        assert result is not None
+        assert result["parameterValues"][0]["value"] == "1"
+
+    def test_read_parameter_values_json(self, tmp_path):
+        bundle_dir = tmp_path / "bundle"
+        bundle_dir.mkdir()
+        (bundle_dir / "parameter_values.json").write_text(
+            json.dumps({"parameterValues": [{"name": "Y", "value": "2"}]})
+        )
+        result = LocalBundleRepository._read_parameter_values(str(bundle_dir))
+        assert result is not None
+        assert result["parameterValues"][0]["value"] == "2"
+
+    def test_read_parameter_values_none(self, tmp_path):
+        bundle_dir = tmp_path / "bundle"
+        bundle_dir.mkdir()
+        result = LocalBundleRepository._read_parameter_values(str(bundle_dir))
+        assert result is None
