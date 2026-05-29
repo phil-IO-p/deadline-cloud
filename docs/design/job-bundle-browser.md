@@ -30,7 +30,7 @@ Job bundles can be either:
 - **Directories** — a folder containing `template.yaml` or `template.json` at the root, plus any scripts, data files, and `asset_references.yaml`.
 - **Archives** — an `.ojd` file (zip format under the hood) containing a job bundle. The template can be at the archive root or inside a single wrapper directory.
 
-Both formats are supported for both local and S3 browsing. Archives are extracted to a local directory before submission. If an archive contains a single top-level wrapper directory (e.g. `my-bundle/template.yaml` instead of `template.yaml` at the root), the wrapper is detected and the inner directory is used as the bundle path.
+Both formats are supported for local browsing. S3 browsing only supports `.ojd` archives — this is the canonical sharing format. Archives are extracted to a local directory before submission. If an archive contains a single top-level wrapper directory (e.g. `my-bundle/template.yaml` instead of `template.yaml` at the root), the wrapper is detected and the inner directory is used as the bundle path.
 
 ### Backend Abstraction
 
@@ -71,7 +71,7 @@ class BundleRepository(Protocol):
 Two implementations:
 
 - `LocalBundleRepository` — walks the local filesystem. Lists directories and archive files. Directories are bundles if they contain `template.yaml`/`template.json`. Archives are always shown as bundles (validated on preview). Provides `extract_bundle()` for extracting archives to a local directory.
-- `S3BundleRepository` — lists objects and prefixes under the queue's job attachment bucket at `{rootPrefix}/job-bundles/`. Folder prefixes and archive objects are both listed. Provides `resolve_bundle()` which handles both folder downloads and archive download+cache+extract.
+- `S3BundleRepository` — lists objects and prefixes under the queue's job attachment bucket at `{rootPrefix}/job-bundles/`. Only `.ojd` archives are recognized as bundles; subfolders are shown for navigation only. Provides `resolve_bundle()` which handles archive download+cache+extract.
 
 ### S3 Bucket Convention
 
@@ -372,8 +372,8 @@ Uploaded bundle to s3://my-farm-bucket/DeadlineCloud/job-bundles/custom-name.ojd
 
 Downloads a job bundle from the queue's S3 `job-bundles/` folder.
 
-- Looks for both archive and folder formats by name.
-- Archive bundles use the ETag cache (same as the browser dialog) — repeated downloads are instant if the archive hasn't changed.
+- Finds the `.ojd` archive matching the given name.
+- Uses the ETag cache (same as the browser dialog) — repeated downloads are instant if the archive hasn't changed.
 - `-o, --output-dir`: Local directory to extract/download to (defaults to `.`).
 - `--profile`, `--farm-id`, `--queue-id`: Standard config overrides.
 

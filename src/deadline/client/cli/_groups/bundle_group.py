@@ -10,12 +10,15 @@ import json
 import logging
 import sys
 import re
+import io
+import zipfile
 from typing import Any, Optional
 import tempfile
 import shutil
 import os
 from dataclasses import fields
 
+import boto3
 import click
 from botocore.exceptions import ClientError
 
@@ -775,9 +778,6 @@ def bundle_upload(job_bundle_dir, name, **args):
     """
     Upload a job bundle to the queue's S3 job-bundles folder as an .ojd archive.
     """
-    import zipfile
-    import io
-
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
     s3_settings = _get_queue_s3_settings(config)
 
@@ -816,8 +816,6 @@ def bundle_upload(job_bundle_dir, name, **args):
 
     bundle_name = name or os.path.basename(job_bundle_dir)
     prefix = f"{s3_settings.rootPrefix.rstrip('/')}/{S3_JOB_BUNDLES_PREFIX}"
-
-    import boto3
 
     s3 = boto3.client("s3")
 

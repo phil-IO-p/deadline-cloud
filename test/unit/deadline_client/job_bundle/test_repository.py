@@ -2,6 +2,8 @@
 
 """Tests for the job bundle repository module."""
 
+from __future__ import annotations
+
 import json
 import os
 import zipfile

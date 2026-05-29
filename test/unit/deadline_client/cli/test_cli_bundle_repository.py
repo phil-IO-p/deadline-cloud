@@ -45,8 +45,8 @@ class TestBundleList:
         bundle.mkdir()
         (bundle / "template.yaml").write_text("name: Dir\nsteps: []\n")
 
-        zip_path = tmp_path / "archive-bundle.zip"
-        with zipfile.ZipFile(str(zip_path), "w") as zf:
+        ojd_path = tmp_path / "archive-bundle.ojd"
+        with zipfile.ZipFile(str(ojd_path), "w") as zf:
             zf.writestr("template.yaml", "name: Zipped\nsteps: []\n")
 
         runner = CliRunner()
@@ -97,28 +97,6 @@ class TestBundleUpload:
         assert result.exit_code == 0, result.output
         assert "Uploaded bundle to" in result.output
         mock_s3.upload_fileobj.assert_called_once()
-
-    @patch(f"{BUNDLE_GROUP}._apply_cli_options_to_config")
-    @patch(f"{BUNDLE_GROUP}._get_queue_s3_settings")
-    @patch("boto3.client")
-    def test_upload_no_archive(self, mock_boto3_client, mock_s3_settings, mock_config, tmp_path):
-        bundle = tmp_path / "my-bundle"
-        bundle.mkdir()
-        (bundle / "template.yaml").write_text("name: Test\nsteps: []\n")
-        (bundle / "script.sh").write_text("echo hello")
-
-        mock_s3_settings.return_value = MagicMock(
-            s3BucketName="test-bucket", rootPrefix="DeadlineCloud"
-        )
-        mock_s3 = MagicMock()
-        mock_boto3_client.return_value = mock_s3
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["bundle", "upload", str(bundle), "--no-archive"])
-
-        assert result.exit_code == 0, result.output
-        assert "Uploaded 2 files" in result.output
-        assert mock_s3.upload_file.call_count == 2
 
     @patch(f"{BUNDLE_GROUP}._apply_cli_options_to_config")
     @patch(f"{BUNDLE_GROUP}._get_queue_s3_settings")

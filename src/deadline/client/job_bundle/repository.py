@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import zipfile
 from dataclasses import dataclass, field
 from logging import getLogger
@@ -413,7 +414,7 @@ class S3BundleRepository:
         try:
             head = self._s3.head_object(Bucket=self._bucket, Key=key)
         except Exception:
-            pass
+            pass  # head_object failure is non-fatal; we fall through to download
 
         if head:
             # Check local cache validity
@@ -446,8 +447,6 @@ class S3BundleRepository:
 
         # Extract to cache so resolve_bundle can reuse it
         if os.path.exists(cache_dir):
-            import shutil
-
             shutil.rmtree(cache_dir)
         os.makedirs(cache_dir, exist_ok=True)
         try:
@@ -480,7 +479,7 @@ class S3BundleRepository:
                         logger.info("Using cached bundle: %s", bundle_path)
                         return bundle_path
             except Exception:
-                pass
+                pass  # Cache validation failed; re-download below
 
         # Download, extract, and cache
         resp = self._s3.get_object(Bucket=self._bucket, Key=key)
@@ -490,8 +489,6 @@ class S3BundleRepository:
 
         # Clear old cache and extract
         if os.path.exists(cache_dir):
-            import shutil
-
             shutil.rmtree(cache_dir)
         os.makedirs(cache_dir, exist_ok=True)
 

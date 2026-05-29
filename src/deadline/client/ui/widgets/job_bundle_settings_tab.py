@@ -6,7 +6,10 @@ UI widgets for the scene settings tab.
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
+import tempfile
 from logging import getLogger
 from typing import Any, Optional
 
@@ -18,6 +21,7 @@ from qtpy.QtWidgets import (  # type: ignore
 )
 
 from ..dataclasses import JobBundleSettings
+from ...config import get_setting
 from .openjd_parameters_widget import OpenJDParametersWidget
 from ...job_bundle.submission import AssetReferences
 from ...job_bundle.loader import read_yaml_or_json_object, validate_directory_symlink_containment
@@ -79,7 +83,6 @@ class JobBundleSettingsWidget(QWidget):
         Browse and load the selected submission bundle
         """
         from ..dialogs.job_bundle_browser_dialog import JobBundleBrowserDialog
-        from ...config import get_setting
 
         # Determine the default local browse directory
         default_dir = os.environ.get("DEADLINE_JOB_BUNDLE_DEFAULT_DIRECTORY", "")
@@ -127,20 +130,12 @@ class JobBundleSettingsWidget(QWidget):
             if browser.selected_is_archive:
                 input_job_bundle_dir = browser.s3_repo.resolve_bundle(browser.selected_path, "")
             else:
-                import tempfile
-                import atexit
-                import shutil
-
                 temp_dir = tempfile.mkdtemp(prefix="deadline-bundle-")
                 atexit.register(shutil.rmtree, temp_dir, True)
                 input_job_bundle_dir = browser.s3_repo.resolve_bundle(
                     browser.selected_path, temp_dir
                 )
         elif browser.selected_is_archive:
-            import tempfile
-            import atexit
-            import shutil
-
             temp_dir = tempfile.mkdtemp(prefix="deadline-bundle-")
             atexit.register(shutil.rmtree, temp_dir, True)
             input_job_bundle_dir = browser._local_repo.extract_bundle(
