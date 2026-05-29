@@ -24,6 +24,7 @@ from ...config import config_file
 from ...dataclasses import SubmitterInfo
 from ...job_bundle.loader import is_job_bundle_dir
 from ...job_bundle.repository import (
+    BundleRepository,
     LocalBundleRepository,
     S3BundleRepository,
     S3_JOB_BUNDLES_PREFIX,
@@ -590,7 +591,7 @@ def bundle_list(path, use_s3, no_archives, output, **args):
     if use_s3:
         config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
         s3_settings = _get_queue_s3_settings(config)
-        repo = S3BundleRepository(
+        repo: BundleRepository = S3BundleRepository(
             bucket_name=s3_settings.s3BucketName,
             root_prefix=s3_settings.rootPrefix,
         )

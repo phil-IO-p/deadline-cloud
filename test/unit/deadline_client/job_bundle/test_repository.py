@@ -145,6 +145,7 @@ class TestBundleInfoFromS3Metadata:
             "bundle-parameters": "Frames:STRING,Output:PATH",
         }
         info = _bundle_info_from_s3_metadata(metadata, "s3://bucket/key")
+        assert info is not None
         assert info.name == "My Bundle"
         assert info.description == "A description"
         assert info.step_names == ["Step1", "Step2"]
@@ -158,6 +159,7 @@ class TestBundleInfoFromS3Metadata:
 
     def test_name_only(self):
         info = _bundle_info_from_s3_metadata({"bundle-name": "Simple"}, "s3://bucket/key")
+        assert info is not None
         assert info.name == "Simple"
         assert info.step_names == []
         assert info.parameters == []
