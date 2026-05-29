@@ -769,28 +769,12 @@ def bundle_cache_update(bundle_name, **args):
     "--name",
     help="Name for the archive in S3. Defaults to the bundle directory name.",
 )
-@click.option(
-    "--format",
-    "archive_format",
-    type=click.Choice(["zip", "tar.gz"], case_sensitive=False),
-    default="zip",
-    help="Archive format to upload as.",
-)
-@click.option(
-    "--no-archive",
-    is_flag=True,
-    help="Upload as a folder (loose files) instead of an archive.",
-)
 @_handle_error
-def bundle_upload(job_bundle_dir, name, archive_format, no_archive, **args):
+def bundle_upload(job_bundle_dir, name, **args):
     """
-    Upload a job bundle to the queue's S3 job-bundles folder.
-
-    By default, the bundle is archived as a zip before uploading.
-    Use --no-archive to upload as loose files instead.
+    Upload a job bundle to the queue's S3 job-bundles folder as an .ojd archive.
     """
     import zipfile
-    import tarfile
     import io
 
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
@@ -836,47 +820,25 @@ def bundle_upload(job_bundle_dir, name, archive_format, no_archive, **args):
 
     s3 = boto3.client("s3")
 
-    if no_archive:
-        # Upload as loose files
-        s3_prefix = f"{prefix}/{bundle_name}/"
-        file_count = 0
+    # Archive and upload
+    buf = io.BytesIO()
+    ext = ".ojd"
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, _dirs, files in os.walk(job_bundle_dir):
             for fname in files:
                 local_path = os.path.join(root, fname)
-                rel_path = os.path.relpath(local_path, job_bundle_dir)
-                s3_key = f"{s3_prefix}{rel_path}"
-                s3.upload_file(local_path, s3_settings.s3BucketName, s3_key)
-                file_count += 1
-        click.echo(f"Uploaded {file_count} files to s3://{s3_settings.s3BucketName}/{s3_prefix}")
-    else:
-        # Archive and upload
-        buf = io.BytesIO()
-        if archive_format == "zip":
-            ext = ".zip"
-            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for root, _dirs, files in os.walk(job_bundle_dir):
-                    for fname in files:
-                        local_path = os.path.join(root, fname)
-                        arcname = os.path.relpath(local_path, job_bundle_dir)
-                        zf.write(local_path, arcname)
-        else:
-            ext = ".tar.gz"
-            with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-                for root, _dirs, files in os.walk(job_bundle_dir):
-                    for fname in files:
-                        local_path = os.path.join(root, fname)
-                        arcname = os.path.relpath(local_path, job_bundle_dir)
-                        tf.add(local_path, arcname)
+                arcname = os.path.relpath(local_path, job_bundle_dir)
+                zf.write(local_path, arcname)
 
-        s3_key = f"{prefix}/{bundle_name}{ext}"
-        buf.seek(0)
-        s3.upload_fileobj(
-            buf,
-            s3_settings.s3BucketName,
-            s3_key,
-            ExtraArgs={"Metadata": bundle_metadata} if bundle_metadata else None,
-        )
-        click.echo(f"Uploaded bundle to s3://{s3_settings.s3BucketName}/{s3_key}")
+    s3_key = f"{prefix}/{bundle_name}{ext}"
+    buf.seek(0)
+    s3.upload_fileobj(
+        buf,
+        s3_settings.s3BucketName,
+        s3_key,
+        ExtraArgs={"Metadata": bundle_metadata} if bundle_metadata else None,
+    )
+    click.echo(f"Uploaded bundle to s3://{s3_settings.s3BucketName}/{s3_key}")
 
 
 @cli_bundle.command(name="download")
@@ -896,7 +858,6 @@ def bundle_download(bundle_name, output_dir, **args):
     Download a job bundle from the queue's S3 job-bundles folder.
 
     BUNDLE_NAME is the name of the bundle (e.g. 'blender-render').
-    The command will look for both archive and folder formats.
     """
 
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)

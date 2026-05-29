@@ -2,10 +2,8 @@
 
 """Tests for the job bundle repository module."""
 
-import io
 import json
 import os
-import tarfile
 import zipfile
 
 import yaml
@@ -94,7 +92,7 @@ class TestExtractBundleInfo:
         frames = info.parameters[0]
         assert frames["_display_value"] == "1-10"
 
-    def test_name_resolution_with_param_reference(self):
+    def test_name_with_param_reference(self):
         template = {
             "name": "Render {{Param.SceneName}}",
             "steps": [],
@@ -103,9 +101,9 @@ class TestExtractBundleInfo:
             ],
         }
         info = _extract_bundle_info(template, "/path")
-        assert info.name == "Render my_scene"
+        assert info.name == "Render {{Param.SceneName}}"
 
-    def test_name_resolution_with_parameter_values(self):
+    def test_name_not_resolved_with_parameter_values(self):
         template = {
             "name": "{{Param.JobName}}",
             "steps": [],
@@ -115,9 +113,9 @@ class TestExtractBundleInfo:
         }
         pv = {"parameterValues": [{"name": "JobName", "value": "Custom Name"}]}
         info = _extract_bundle_info(template, "/path", pv)
-        assert info.name == "Custom Name"
+        assert info.name == "{{Param.JobName}}"
 
-    def test_name_resolution_unresolved_param(self):
+    def test_name_unresolved_param(self):
         template = {
             "name": "{{Param.Missing}}",
             "steps": [],
@@ -126,8 +124,8 @@ class TestExtractBundleInfo:
         info = _extract_bundle_info(template, "/path")
         assert info.name == "{{Param.Missing}}"
 
-    def test_name_resolution_param_from_pv_not_in_definitions(self):
-        """Parameter values can contain params not in parameterDefinitions (e.g. queue params)."""
+    def test_name_not_resolved_from_pv(self):
+        """Parameter values don't affect the displayed name."""
         template = {
             "name": "{{Param.JobName}}",
             "steps": [],
@@ -135,7 +133,7 @@ class TestExtractBundleInfo:
         }
         pv = {"parameterValues": [{"name": "JobName", "value": "From PV"}]}
         info = _extract_bundle_info(template, "/path", pv)
-        assert info.name == "From PV"
+        assert info.name == "{{Param.JobName}}"
 
 
 class TestBundleInfoFromS3Metadata:
@@ -167,58 +165,47 @@ class TestBundleInfoFromS3Metadata:
 
 class TestArchiveHelpers:
     def test_is_archive(self):
-        assert _is_archive("bundle.zip")
-        assert _is_archive("bundle.tar.gz")
-        assert _is_archive("bundle.tgz")
-        assert _is_archive("bundle.tar.bz2")
-        assert _is_archive("bundle.tar.xz")
-        assert _is_archive("bundle.tar")
+        assert _is_archive("bundle.ojd")
+        assert not _is_archive("bundle.zip")
+        assert not _is_archive("bundle.tar.gz")
+        assert not _is_archive("bundle.tgz")
+        assert not _is_archive("bundle.tar.bz2")
+        assert not _is_archive("bundle.tar.xz")
+        assert not _is_archive("bundle.tar")
         assert not _is_archive("bundle")
         assert not _is_archive("template.yaml")
 
     def test_strip_archive_ext(self):
-        assert _strip_archive_ext("bundle.zip") == "bundle"
-        assert _strip_archive_ext("bundle.tar.gz") == "bundle"
-        assert _strip_archive_ext("bundle.tgz") == "bundle"
-        assert _strip_archive_ext("my-job.tar.bz2") == "my-job"
+        assert _strip_archive_ext("bundle.ojd") == "bundle"
+        assert _strip_archive_ext("my-job.ojd") == "my-job"
         assert _strip_archive_ext("noext") == "noext"
 
 
 class TestReadTemplateFromArchive:
-    def _make_zip(self, tmp_path, contents: dict[str, str]) -> str:
-        zip_path = str(tmp_path / "bundle.zip")
-        with zipfile.ZipFile(zip_path, "w") as zf:
+    def _make_ojd(self, tmp_path, contents: dict[str, str]) -> str:
+        ojd_path = str(tmp_path / "bundle.ojd")
+        with zipfile.ZipFile(ojd_path, "w") as zf:
             for name, data in contents.items():
                 zf.writestr(name, data)
-        return zip_path
+        return ojd_path
 
-    def _make_tar_gz(self, tmp_path, contents: dict[str, str]) -> str:
-        tar_path = str(tmp_path / "bundle.tar.gz")
-        with tarfile.open(tar_path, "w:gz") as tf:
-            for name, data in contents.items():
-                info = tarfile.TarInfo(name=name)
-                encoded = data.encode("utf-8")
-                info.size = len(encoded)
-                tf.addfile(info, io.BytesIO(encoded))
-        return tar_path
-
-    def test_zip_root_template(self, tmp_path):
-        path = self._make_zip(tmp_path, {"template.yaml": "name: ZipBundle\nsteps: []\n"})
+    def test_ojd_root_template(self, tmp_path):
+        path = self._make_ojd(tmp_path, {"template.yaml": "name: OjdBundle\nsteps: []\n"})
         result = _read_template_from_archive_path(path)
         assert result is not None
         raw, fname = result
-        assert "ZipBundle" in raw
+        assert "OjdBundle" in raw
         assert fname == "template.yaml"
 
-    def test_zip_wrapped_template(self, tmp_path):
-        path = self._make_zip(tmp_path, {"my-bundle/template.yaml": "name: Wrapped\nsteps: []\n"})
+    def test_ojd_wrapped_template(self, tmp_path):
+        path = self._make_ojd(tmp_path, {"my-bundle/template.yaml": "name: Wrapped\nsteps: []\n"})
         result = _read_template_from_archive_path(path)
         assert result is not None
         raw, fname = result
         assert "Wrapped" in raw
 
-    def test_zip_json_template(self, tmp_path):
-        path = self._make_zip(
+    def test_ojd_json_template(self, tmp_path):
+        path = self._make_ojd(
             tmp_path,
             {"template.json": json.dumps({"name": "JSONBundle", "steps": []})},
         )
@@ -227,25 +214,10 @@ class TestReadTemplateFromArchive:
         raw, fname = result
         assert fname == "template.json"
 
-    def test_zip_no_template(self, tmp_path):
-        path = self._make_zip(tmp_path, {"readme.txt": "no template here"})
+    def test_ojd_no_template(self, tmp_path):
+        path = self._make_ojd(tmp_path, {"readme.txt": "no template here"})
         result = _read_template_from_archive_path(path)
         assert result is None
-
-    def test_tar_gz_root_template(self, tmp_path):
-        path = self._make_tar_gz(tmp_path, {"template.yaml": "name: TarBundle\nsteps: []\n"})
-        result = _read_template_from_archive_path(path)
-        assert result is not None
-        raw, fname = result
-        assert "TarBundle" in raw
-
-    def test_tar_gz_wrapped_template(self, tmp_path):
-        path = self._make_tar_gz(
-            tmp_path, {"my-bundle/template.yaml": "name: TarWrapped\nsteps: []\n"}
-        )
-        result = _read_template_from_archive_path(path)
-        assert result is not None
-        assert "TarWrapped" in result[0]
 
 
 class TestLocalBundleRepository:
@@ -288,8 +260,8 @@ class TestLocalBundleRepository:
         assert dir_entry.is_bundle is False
 
     def test_list_entries_with_valid_archive(self, tmp_path):
-        zip_path = tmp_path / "render-job.zip"
-        with zipfile.ZipFile(str(zip_path), "w") as zf:
+        ojd_path = tmp_path / "render-job.ojd"
+        with zipfile.ZipFile(str(ojd_path), "w") as zf:
             zf.writestr("template.yaml", "name: Render\nsteps:\n- name: S1\n")
 
         repo = LocalBundleRepository(root=str(tmp_path))
@@ -301,9 +273,9 @@ class TestLocalBundleRepository:
         assert archive_entries[0].is_bundle is True
 
     def test_list_entries_invalid_archive_excluded(self, tmp_path):
-        """A zip without a template should not appear as a bundle."""
-        zip_path = tmp_path / "random.zip"
-        with zipfile.ZipFile(str(zip_path), "w") as zf:
+        """An .ojd without a template should not appear as a bundle."""
+        ojd_path = tmp_path / "random.ojd"
+        with zipfile.ZipFile(str(ojd_path), "w") as zf:
             zf.writestr("readme.txt", "not a bundle")
 
         repo = LocalBundleRepository(root=str(tmp_path))
@@ -312,8 +284,8 @@ class TestLocalBundleRepository:
 
     def test_list_entries_include_archives_false(self, tmp_path):
         """With include_archives=False, archives are skipped entirely."""
-        zip_path = tmp_path / "bundle.zip"
-        with zipfile.ZipFile(str(zip_path), "w") as zf:
+        ojd_path = tmp_path / "bundle.ojd"
+        with zipfile.ZipFile(str(ojd_path), "w") as zf:
             zf.writestr("template.yaml", "name: Zipped\nsteps: []\n")
 
         bundle_dir = tmp_path / "dir-bundle"
@@ -385,19 +357,19 @@ class TestLocalBundleRepository:
         info = repo.get_bundle_info(str(bundle_dir))
 
         assert info is not None
-        assert info.name == "My Custom Job"
+        assert info.name == "{{Param.JobName}}"
         frames = next(p for p in info.parameters if p["name"] == "Frames")
         assert frames["_display_value"] == "1-100"
 
     def test_get_bundle_info_archive(self, tmp_path):
-        zip_path = tmp_path / "my-job.zip"
-        with zipfile.ZipFile(str(zip_path), "w") as zf:
+        ojd_path = tmp_path / "my-job.ojd"
+        with zipfile.ZipFile(str(ojd_path), "w") as zf:
             zf.writestr(
                 "template.yaml",
                 yaml.dump(
                     {
                         "name": "Archive Job",
-                        "description": "From a zip",
+                        "description": "From an ojd",
                         "steps": [{"name": "Run"}],
                         "parameterDefinitions": [{"name": "Input", "type": "PATH"}],
                     }
@@ -405,11 +377,11 @@ class TestLocalBundleRepository:
             )
 
         repo = LocalBundleRepository(root=str(tmp_path))
-        info = repo.get_bundle_info(str(zip_path))
+        info = repo.get_bundle_info(str(ojd_path))
 
         assert info is not None
         assert info.name == "Archive Job"
-        assert info.description == "From a zip"
+        assert info.description == "From an ojd"
         assert info.step_names == ["Run"]
         assert len(info.parameters) == 1
 
@@ -422,29 +394,29 @@ class TestLocalBundleRepository:
         assert info is None
 
     def test_extract_bundle_flat(self, tmp_path):
-        zip_path = tmp_path / "flat.zip"
-        with zipfile.ZipFile(str(zip_path), "w") as zf:
+        ojd_path = tmp_path / "flat.ojd"
+        with zipfile.ZipFile(str(ojd_path), "w") as zf:
             zf.writestr("template.yaml", "name: Flat\nsteps: []\n")
             zf.writestr("scripts/run.sh", "#!/bin/bash\necho hello\n")
 
         dest = tmp_path / "extracted"
         dest.mkdir()
         repo = LocalBundleRepository()
-        result = repo.extract_bundle(str(zip_path), str(dest))
+        result = repo.extract_bundle(str(ojd_path), str(dest))
 
         assert os.path.isfile(os.path.join(result, "template.yaml"))
         assert os.path.isfile(os.path.join(result, "scripts", "run.sh"))
 
     def test_extract_bundle_wrapped(self, tmp_path):
-        zip_path = tmp_path / "wrapped.zip"
-        with zipfile.ZipFile(str(zip_path), "w") as zf:
+        ojd_path = tmp_path / "wrapped.ojd"
+        with zipfile.ZipFile(str(ojd_path), "w") as zf:
             zf.writestr("my-bundle/template.yaml", "name: Wrapped\nsteps: []\n")
             zf.writestr("my-bundle/scripts/run.sh", "#!/bin/bash\n")
 
         dest = tmp_path / "extracted"
         dest.mkdir()
         repo = LocalBundleRepository()
-        result = repo.extract_bundle(str(zip_path), str(dest))
+        result = repo.extract_bundle(str(ojd_path), str(dest))
 
         assert os.path.isfile(os.path.join(result, "template.yaml"))
 

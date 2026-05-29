@@ -2,7 +2,7 @@
 
 """
 Bundle repository abstraction for browsing job bundles from local filesystem or S3.
-Supports both directory-based bundles and archive bundles (.zip, .tar.gz, etc.).
+Supports both directory-based bundles and .ojd archive bundles (zip format).
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import hashlib
 import io
 import json
 import os
-import tarfile
 import zipfile
 from dataclasses import dataclass, field
 from logging import getLogger
@@ -23,20 +22,19 @@ logger = getLogger(__name__)
 
 TEMPLATE_FILENAMES = ("template.yaml", "template.json")
 S3_JOB_BUNDLES_PREFIX = "job-bundles"
-ARCHIVE_EXTENSIONS = (".zip", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar")
+ARCHIVE_EXTENSION = ".ojd"
 CACHE_META_FILENAME = ".bundle_cache_meta.json"
 
 
 def _is_archive(name: str) -> bool:
-    """Check if a filename looks like a supported archive."""
-    return any(name.endswith(ext) for ext in ARCHIVE_EXTENSIONS)
+    """Check if a filename is an .ojd archive."""
+    return name.endswith(ARCHIVE_EXTENSION)
 
 
 def _strip_archive_ext(name: str) -> str:
-    """Remove the archive extension from a filename."""
-    for ext in ARCHIVE_EXTENSIONS:
-        if name.endswith(ext):
-            return name[: -len(ext)]
+    """Remove the .ojd extension from a filename."""
+    if name.endswith(ARCHIVE_EXTENSION):
+        return name[: -len(ARCHIVE_EXTENSION)]
     return name
 
 
@@ -44,67 +42,27 @@ def _safe_zip_extract(zf: zipfile.ZipFile, dest_dir: str) -> None:
     """Extract a zip file, rejecting archives with entries that would escape dest_dir."""
     dest = os.path.realpath(dest_dir)
     for member in zf.namelist():
-        # Reject absolute paths
         if os.path.isabs(member):
-            raise ValueError(f"Zip contains absolute path: {member}")
-        # Reject path traversal
+            raise ValueError(f"Archive contains absolute path: {member}")
         target = os.path.normpath(os.path.join(dest, member))
         if not (target.startswith(dest + os.sep) or target == dest):
-            raise ValueError(f"Zip entry would extract outside target directory: {member}")
+            raise ValueError(f"Archive entry would extract outside target directory: {member}")
     zf.extractall(dest_dir)
 
 
-def _safe_tar_extract(tf: tarfile.TarFile, dest_dir: str) -> None:
-    """Extract a tar file safely, rejecting entries that would escape dest_dir."""
-    dest = os.path.realpath(dest_dir)
-    for member in tf.getmembers():
-        if member.issym() or member.islnk():
-            raise ValueError(f"Tar contains symlink or hard link: {member.name}")
-        if os.path.isabs(member.name):
-            raise ValueError(f"Tar contains absolute path: {member.name}")
-        target = os.path.normpath(os.path.join(dest, member.name))
-        if not (target.startswith(dest + os.sep) or target == dest):
-            raise ValueError(f"Tar entry would extract outside target directory: {member.name}")
-    try:
-        tf.extractall(dest_dir, filter="data")
-    except TypeError:
-        # Python < 3.12 doesn't support filter=
-        tf.extractall(dest_dir)
-
-
 def _extract_archive(archive_path: str, dest_dir: str) -> None:
-    """Extract an archive to dest_dir."""
-    if archive_path.endswith(".zip"):
-        with zipfile.ZipFile(archive_path, "r") as zf:
-            _safe_zip_extract(zf, dest_dir)
-    else:
-        with tarfile.open(archive_path, "r:*") as tf:
-            _safe_tar_extract(tf, dest_dir)
+    """Extract an .ojd archive to dest_dir."""
+    with zipfile.ZipFile(archive_path, "r") as zf:
+        _safe_zip_extract(zf, dest_dir)
 
 
 def _read_template_from_archive_path(archive_path: str) -> Optional[tuple[str, str]]:
-    """Read a template file from a local archive. Returns (contents, filename) or None."""
-    if archive_path.endswith(".zip"):
-        return _read_template_from_zip_path(archive_path)
-    else:
-        return _read_template_from_tar_path(archive_path)
-
-
-def _read_template_from_zip_path(archive_path: str) -> Optional[tuple[str, str]]:
+    """Read a template file from a local .ojd archive. Returns (contents, filename) or None."""
     try:
         with zipfile.ZipFile(archive_path, "r") as zf:
             return _read_template_from_zip(zf)
     except Exception:
-        logger.debug("Failed to read template from zip %s", archive_path, exc_info=True)
-        return None
-
-
-def _read_template_from_tar_path(archive_path: str) -> Optional[tuple[str, str]]:
-    try:
-        with tarfile.open(archive_path, "r:*") as tf:
-            return _read_template_from_tar(tf)
-    except Exception:
-        logger.debug("Failed to read template from tar %s", archive_path, exc_info=True)
+        logger.debug("Failed to read template from archive %s", archive_path, exc_info=True)
         return None
 
 
@@ -112,52 +70,26 @@ def _read_template_from_zip(zf: zipfile.ZipFile) -> Optional[tuple[str, str]]:
     """Read a template file from an open ZipFile. Returns (contents, filename) or None."""
     names = zf.namelist()
     for fname in TEMPLATE_FILENAMES:
-        # Check both root-level and single-directory-wrapped
         matches = [n for n in names if n == fname or n.endswith("/" + fname)]
-        # Prefer the shallowest match
         matches.sort(key=lambda n: n.count("/"))
         if matches:
             return zf.read(matches[0]).decode("utf-8"), fname
     return None
 
 
-def _read_template_from_tar(tf: tarfile.TarFile) -> Optional[tuple[str, str]]:
-    """Read a template file from an open TarFile. Returns (contents, filename) or None."""
-    members = tf.getnames()
-    for fname in TEMPLATE_FILENAMES:
-        matches = [n for n in members if n == fname or n.endswith("/" + fname)]
-        matches.sort(key=lambda n: n.count("/"))
-        if matches:
-            f = tf.extractfile(matches[0])
-            if f:
-                return f.read().decode("utf-8"), fname
-    return None
-
-
-def _read_template_from_bytes(data: bytes, filename: str) -> Optional[tuple[str, str]]:
-    """Read a template from archive bytes in memory. Returns (contents, template_filename) or None."""
-    if filename.endswith(".zip"):
-        try:
-            with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
-                return _read_template_from_zip(zf)
-        except Exception:
-            return None
-    else:
-        try:
-            with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tf:
-                return _read_template_from_tar(tf)
-        except Exception:
-            return None
-
-
-def _extract_archive_from_bytes(data: bytes, filename: str, dest_dir: str) -> None:
-    """Extract an archive from bytes in memory to dest_dir."""
-    if filename.endswith(".zip"):
+def _read_template_from_bytes(data: bytes) -> Optional[tuple[str, str]]:
+    """Read a template from .ojd archive bytes in memory. Returns (contents, template_filename) or None."""
+    try:
         with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
-            _safe_zip_extract(zf, dest_dir)
-    else:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tf:
-            _safe_tar_extract(tf, dest_dir)
+            return _read_template_from_zip(zf)
+    except Exception:
+        return None
+
+
+def _extract_archive_from_bytes(data: bytes, dest_dir: str) -> None:
+    """Extract an .ojd archive from bytes in memory to dest_dir."""
+    with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+        _safe_zip_extract(zf, dest_dir)
 
 
 @dataclass
@@ -221,15 +153,6 @@ def _extract_bundle_info(
             if "name" in pv and "value" in pv:
                 pv_map[pv["name"]] = pv["value"]
 
-    # Build a combined value map: parameter_values > defaults
-    value_map: dict[str, str] = {}
-    for p in params:
-        pname = p.get("name", "")
-        if "default" in p:
-            value_map[pname] = str(p["default"])
-    # parameter_values override defaults
-    value_map.update(pv_map)
-
     # Attach resolved value to each parameter: parameter_values > default > empty
     for p in params:
         name = p.get("name", "")
@@ -238,19 +161,11 @@ def _extract_bundle_info(
         elif "default" in p:
             p["_display_value"] = str(p["default"])
 
-    # Resolve {{Param.X}} references in the name
     raw_name = template.get("name", os.path.basename(path.rstrip("/")))
-    import re
-
-    def _replace_param(m):
-        param_name = m.group(1)
-        return value_map.get(param_name, m.group(0))
-
-    resolved_name = re.sub(r"\{\{Param\.(\w+)\}\}", _replace_param, raw_name)
 
     return BundleInfo(
         path=path,
-        name=resolved_name,
+        name=raw_name,
         description=template.get("description", ""),
         step_names=[s.get("name", "") for s in template.get("steps", [])],
         parameters=params,
@@ -417,8 +332,8 @@ def _bundle_info_from_s3_metadata(metadata: dict, path: str) -> Optional[BundleI
 
 
 class S3BundleRepository:
-    """Browse job bundles in an S3 bucket under {rootPrefix}/job-bundles/.
-    Supports both folder-based bundles and archive bundles (.zip, .tar.gz, etc.).
+    """Browse .ojd job bundles in an S3 bucket under {rootPrefix}/job-bundles/.
+    Only .ojd archives are supported. Subfolders are shown for navigation only.
     Archive bundles are cached locally with ETag validation."""
 
     def __init__(self, bucket_name: str, root_prefix: str, session=None):
@@ -440,13 +355,13 @@ class S3BundleRepository:
         try:
             paginator = self._s3.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix, Delimiter="/"):
-                # Folder-based bundles (common prefixes)
+                # Subfolders (for navigation only, not bundles)
                 for cp in page.get("CommonPrefixes", []):
                     child_prefix = cp["Prefix"]
                     name = child_prefix.rstrip("/").rsplit("/", 1)[-1]
                     child_path = f"s3://{self._bucket}/{child_prefix}"
                     child_prefixes.append((name, child_prefix, child_path))
-                # Archive bundles (objects with archive extensions)
+                # .ojd archive bundles
                 for obj in page.get("Contents", []):
                     key = obj["Key"]
                     name = key.rsplit("/", 1)[-1] if "/" in key else key
@@ -464,158 +379,26 @@ class S3BundleRepository:
             logger.warning("Failed to list S3 prefix %s", prefix, exc_info=True)
             raise
 
-        # Batch-detect which folders are bundles with a single recursive listing
-        # instead of per-folder head_object calls
-        if child_prefixes:
-            bundle_prefixes = self._batch_detect_bundles(prefix, child_prefixes)
-            for name, child_prefix, child_path in child_prefixes:
-                is_bundle = child_prefix in bundle_prefixes
-                entries.append(BrowseEntry(name=name, path=child_path, is_bundle=is_bundle))
+        # Subfolders are shown for navigation but never as bundles
+        for name, child_prefix, child_path in child_prefixes:
+            entries.append(BrowseEntry(name=name, path=child_path, is_bundle=False))
 
         entries.sort(key=lambda e: e.name.lower())
         return entries
 
     def get_bundle_info(self, path: str) -> Optional[BundleInfo]:
-        if self._path_is_archive(path):
-            return self._get_archive_bundle_info(path)
-        return self._get_folder_bundle_info(path)
+        return self._get_archive_bundle_info(path)
 
     def resolve_bundle(self, path: str, dest_dir: str) -> str:
-        """Resolve an S3 bundle to a local directory path for the submitter dialog.
-        For archives: downloads, caches with ETag, and extracts (full bundle).
-        For folders: downloads only metadata files (template, parameters, etc.).
+        """Resolve an S3 .ojd bundle to a local directory path.
+        Downloads, caches with ETag, and extracts.
         Returns the local path to the usable bundle directory."""
-        if self._path_is_archive(path):
-            return self._resolve_archive_bundle(path)
-        return self._download_folder_bundle_metadata(path, dest_dir)
+        return self._resolve_archive_bundle(path)
 
     def download_full_bundle(self, path: str, dest_dir: str) -> str:
-        """Download a complete S3 bundle to a local directory.
-        For archives: uses the ETag cache.
-        For folders: downloads all objects (with size check).
-        Use this for the CLI 'download' command."""
-        if self._path_is_archive(path):
-            return self._resolve_archive_bundle(path)
-        return self._download_folder_bundle(path, dest_dir)
-
-    # ── Folder bundles ───────────────────────────────────────
-
-    def _get_folder_bundle_info(self, path: str) -> Optional[BundleInfo]:
-        prefix = self._to_s3_prefix(path)
-        for fname in TEMPLATE_FILENAMES:
-            key = prefix + fname
-            try:
-                resp = self._s3.get_object(Bucket=self._bucket, Key=key)
-                raw = resp["Body"].read().decode("utf-8")
-                template = _parse_template(raw, fname)
-                if template:
-                    return _extract_bundle_info(template, path)
-            except self._s3.exceptions.NoSuchKey:
-                continue
-            except Exception:
-                logger.debug("Failed to get S3 object %s", key, exc_info=True)
-                continue
-        return None
-
-    # Maximum total size (in bytes) for downloading an S3 folder bundle.
-    # Folder bundles larger than this should be uploaded as archives instead.
-    MAX_FOLDER_BUNDLE_SIZE = 50 * 1024 * 1024  # 50 MB
-
-    # Files downloaded during resolve (enough to populate the submitter dialog).
-    # The full bundle is only downloaded at submission time.
-    _METADATA_FILES = (
-        "template.yaml",
-        "template.json",
-        "parameter_values.yaml",
-        "parameter_values.json",
-        "asset_references.yaml",
-        "asset_references.json",
-        "hooks.yaml",
-        "hooks.json",
-    )
-
-    def _download_folder_bundle(self, path: str, dest_dir: str) -> str:
-        """Download all objects under the bundle prefix to a local directory."""
-        prefix = self._to_s3_prefix(path)
-        bundle_name = prefix.rstrip("/").rsplit("/", 1)[-1]
-        local_bundle = os.path.join(dest_dir, bundle_name)
-        os.makedirs(local_bundle, exist_ok=True)
-
-        # Collect all objects and check total size before downloading
-        objects_to_download: list[tuple[str, str]] = []  # (key, rel_path)
-        total_size = 0
-        paginator = self._s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-                rel = key[len(prefix) :]
-                if not rel:
-                    continue
-                total_size += obj.get("Size", 0)
-                objects_to_download.append((key, rel))
-
-        if total_size > self.MAX_FOLDER_BUNDLE_SIZE:
-            raise RuntimeError(
-                f"S3 folder bundle '{bundle_name}' is {total_size / (1024 * 1024):.1f} MB, "
-                f"which exceeds the {self.MAX_FOLDER_BUNDLE_SIZE / (1024 * 1024):.0f} MB limit. "
-                f"Upload it as an archive instead using 'deadline bundle upload'."
-            )
-
-        for key, rel in objects_to_download:
-            local_path = os.path.join(local_bundle, rel)
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            self._s3.download_file(self._bucket, key, local_path)
-
-        return local_bundle
-
-    def _download_folder_bundle_metadata(self, path: str, dest_dir: str) -> str:
-        """Download only the metadata files (template, parameters, asset_references, hooks)
-        needed to populate the submitter dialog. Skips scripts and data files."""
-        prefix = self._to_s3_prefix(path)
-        bundle_name = prefix.rstrip("/").rsplit("/", 1)[-1]
-        local_bundle = os.path.join(dest_dir, bundle_name)
-        os.makedirs(local_bundle, exist_ok=True)
-
-        for fname in self._METADATA_FILES:
-            key = prefix + fname
-            local_path = os.path.join(local_bundle, fname)
-            try:
-                self._s3.download_file(self._bucket, key, local_path)
-            except Exception:
-                continue  # File doesn't exist, skip
-
-        return local_bundle
-
-    def _is_folder_bundle(self, prefix: str) -> bool:
-        for fname in TEMPLATE_FILENAMES:
-            try:
-                self._s3.head_object(Bucket=self._bucket, Key=prefix + fname)
-                return True
-            except Exception:
-                continue
-        return False
-
-    def _batch_detect_bundles(
-        self, parent_prefix: str, child_prefixes: list[tuple[str, str, str]]
-    ) -> set[str]:
-        """Detect which child prefixes are bundles using a single recursive listing.
-        Returns the set of child_prefix strings that contain a template file."""
-        bundle_set: set[str] = set()
-        child_prefix_set = {cp for _, cp, _ in child_prefixes}
-        try:
-            paginator = self._s3.get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket=self._bucket, Prefix=parent_prefix):
-                for obj in page.get("Contents", []):
-                    key = obj["Key"]
-                    # Check if this key is a template file directly inside a child prefix
-                    for cp in child_prefix_set:
-                        for fname in TEMPLATE_FILENAMES:
-                            if key == cp + fname:
-                                bundle_set.add(cp)
-                                break
-        except Exception:
-            logger.debug("Failed batch bundle detection for %s", parent_prefix, exc_info=True)
-        return bundle_set
+        """Download a complete S3 .ojd bundle to a local directory.
+        Uses the ETag cache for repeated access."""
+        return self._resolve_archive_bundle(path)
 
     # ── Archive bundles ──────────────────────────────────────
 
@@ -661,8 +444,6 @@ class S3BundleRepository:
             logger.debug("Failed to download S3 archive %s", key, exc_info=True)
             return None
 
-        filename = key.rsplit("/", 1)[-1]
-
         # Extract to cache so resolve_bundle can reuse it
         if os.path.exists(cache_dir):
             import shutil
@@ -670,13 +451,13 @@ class S3BundleRepository:
             shutil.rmtree(cache_dir)
         os.makedirs(cache_dir, exist_ok=True)
         try:
-            _extract_archive_from_bytes(data, filename, cache_dir)
+            _extract_archive_from_bytes(data, cache_dir)
             _write_cache_meta(cache_dir, etag, last_modified)
         except Exception:
             logger.debug("Failed to cache S3 archive %s", key, exc_info=True)
 
         # Parse template from the downloaded bytes
-        result = _read_template_from_bytes(data, filename)
+        result = _read_template_from_bytes(data)
         if result:
             raw, fname = result
             template = _parse_template(raw, fname)
@@ -714,8 +495,7 @@ class S3BundleRepository:
             shutil.rmtree(cache_dir)
         os.makedirs(cache_dir, exist_ok=True)
 
-        filename = key.rsplit("/", 1)[-1]
-        _extract_archive_from_bytes(data, filename, cache_dir)
+        _extract_archive_from_bytes(data, cache_dir)
         _write_cache_meta(cache_dir, etag, last_modified)
 
         bundle_path = self._find_bundle_in_cache(cache_dir)
@@ -767,12 +547,6 @@ class S3BundleRepository:
         return None
 
     # ── Helpers ──────────────────────────────────────────────
-
-    @staticmethod
-    def _path_is_archive(path: str) -> bool:
-        # Strip s3:// URI to get the key, then check extension
-        name = path.rstrip("/").rsplit("/", 1)[-1]
-        return _is_archive(name)
 
     def _to_s3_key(self, path: str) -> str:
         """Convert an s3:// URI to a raw S3 key."""
