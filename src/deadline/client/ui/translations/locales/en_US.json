@@ -112,6 +112,7 @@
   "Settings...": "Settings...",
   "Shared job settings": "Shared job settings",
   "Show auto-detected": "Show auto-detected",
+  "Show hidden folders": "Show hidden folders",
   "Show submitter update notifications": "Show submitter update notifications",
   "Specify a job bundle directory or run the bundle command with the --browse flag": "Specify a job bundle directory or run the bundle command with the --browse flag",
   "Specify output directories": "Specify output directories",

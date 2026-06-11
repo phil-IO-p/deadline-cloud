@@ -112,6 +112,7 @@
   "Settings...": "설정...",
   "Shared job settings": "공유 작업 설정",
   "Show auto-detected": "자동 감지된 항목 표시",
+  "Show hidden folders": "숨겨진 폴더 표시",
   "Show submitter update notifications": "제출기 업데이트 알림 표시",
   "Specify a job bundle directory or run the bundle command with the --browse flag": "작업 번들 디렉터리를 지정하거나 --browse 플래그와 함께 bundle 명령을 실행하세요",
   "Specify output directories": "출력 디렉터리 지정",

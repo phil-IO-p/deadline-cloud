@@ -112,6 +112,7 @@
   "Settings...": "Pengaturan...",
   "Shared job settings": "Pengaturan pekerjaan bersama",
   "Show auto-detected": "Tampilkan yang terdeteksi otomatis",
+  "Show hidden folders": "Tampilkan folder tersembunyi",
   "Show submitter update notifications": "Tampilkan notifikasi pembaruan pengirim",
   "Specify a job bundle directory or run the bundle command with the --browse flag": "Tentukan direktori bundel pekerjaan atau jalankan perintah bundle dengan flag --browse",
   "Specify output directories": "Tentukan direktori output",

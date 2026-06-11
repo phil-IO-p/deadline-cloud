@@ -112,6 +112,7 @@
   "Settings...": "Paramètres...",
   "Shared job settings": "Paramètres de tâche partagés",
   "Show auto-detected": "Afficher les éléments détectés automatiquement",
+  "Show hidden folders": "Afficher les dossiers cachés",
   "Show submitter update notifications": "Afficher les notifications de mise à jour du soumetteur",
   "Specify a job bundle directory or run the bundle command with the --browse flag": "Spécifiez un répertoire de lot de tâches ou exécutez la commande bundle avec l'indicateur --browse",
   "Specify output directories": "Spécifier les répertoires de sortie",

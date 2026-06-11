@@ -112,6 +112,7 @@
   "Settings...": "Ayarlar...",
   "Shared job settings": "Paylaşılan iş ayarları",
   "Show auto-detected": "Otomatik algılanmışları göster",
+  "Show hidden folders": "Gizli klasörleri göster",
   "Show submitter update notifications": "Gönderi aracı güncelleme bildirimlerini göster",
   "Specify a job bundle directory or run the bundle command with the --browse flag": "Bir iş paketi dizini belirtin veya bundle komutunu --browse bayrağıyla çalıştırın",
   "Specify output directories": "Çıkış dizinlerini belirtin",

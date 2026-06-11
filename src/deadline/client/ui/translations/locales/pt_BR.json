@@ -112,6 +112,7 @@
   "Settings...": "Configurações...",
   "Shared job settings": "Configurações de trabalho compartilhadas",
   "Show auto-detected": "Mostrar detectados automaticamente",
+  "Show hidden folders": "Mostrar pastas ocultas",
   "Show submitter update notifications": "Mostrar notificações de atualização do submissor",
   "Specify a job bundle directory or run the bundle command with the --browse flag": "Especifique um diretório de pacote de tarefas ou execute o comando bundle com a flag --browse",
   "Specify output directories": "Especificar diretórios de saída",

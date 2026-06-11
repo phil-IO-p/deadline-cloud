@@ -14,6 +14,7 @@ from typing import Optional
 from qtpy.QtCore import Qt, QModelIndex, QSortFilterProxyModel, QTimer, Signal  # type: ignore
 from qtpy.QtGui import QStandardItemModel, QStandardItem  # type: ignore
 from qtpy.QtWidgets import (  # type: ignore
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
@@ -144,6 +145,12 @@ class JobBundleBrowserDialog(QDialog):
         source_row.addStretch()
         layout.addLayout(source_row)
 
+        # Show hidden folders checkbox
+        self._show_hidden_cb = QCheckBox(tr("Show hidden folders"), parent=self)
+        self._show_hidden_cb.setChecked(False)
+        self._show_hidden_cb.toggled.connect(self._on_hidden_toggled)
+        layout.addWidget(self._show_hidden_cb)
+
         # Default to Queue if available, otherwise Local
         if self._s3_available:
             self._radio_s3.setChecked(True)
@@ -248,6 +255,12 @@ class JobBundleBrowserDialog(QDialog):
 
     # ── Tree Population ──────────────────────────────────────────
 
+    def _filter_entries(self, entries: list) -> list:
+        """Filter out hidden entries (names starting with '.') unless show hidden is checked."""
+        if self._show_hidden_cb.isChecked():
+            return entries
+        return [e for e in entries if not e.name.startswith(".")]
+
     def _populate_root(self):
         self._model.clear()
         self._model.setHorizontalHeaderLabels([tr("Name")])
@@ -260,7 +273,7 @@ class JobBundleBrowserDialog(QDialog):
             self._show_error_preview(f"Failed to list bundles:\n{e}")
             entries = []
         root = self._model.invisibleRootItem()
-        for entry in entries:
+        for entry in self._filter_entries(entries):
             self._add_entry_item(root, entry)
 
     def _add_entry_item(self, parent_item: QStandardItem, entry: BrowseEntry):
@@ -303,7 +316,7 @@ class JobBundleBrowserDialog(QDialog):
             error_item.setEnabled(False)
             item.appendRow(error_item)
             return
-        for entry in entries:
+        for entry in self._filter_entries(entries):
             self._add_entry_item(item, entry)
 
     def _on_clicked(self, proxy_index: QModelIndex):
@@ -391,6 +404,11 @@ class JobBundleBrowserDialog(QDialog):
         self._selected_path = None
         self._select_button.setEnabled(False)
         self._clear_preview()
+        self._populate_root()
+
+    def _on_hidden_toggled(self, checked: bool):
+        if not self._ready:
+            return
         self._populate_root()
 
     # ── Preview ──────────────────────────────────────────────────

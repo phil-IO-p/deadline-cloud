@@ -112,6 +112,7 @@
   "Settings...": "設定...",
   "Shared job settings": "共用任務設定",
   "Show auto-detected": "顯示自動偵測的",
+  "Show hidden folders": "顯示隱藏資料夾",
   "Show submitter update notifications": "顯示提交器更新通知",
   "Specify a job bundle directory or run the bundle command with the --browse flag": "指定任務套件目錄或使用 --browse 旗標執行 bundle 命令",
   "Specify output directories": "指定輸出目錄",

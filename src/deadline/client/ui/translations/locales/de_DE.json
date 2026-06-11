@@ -112,6 +112,7 @@
   "Settings...": "Einstellungen...",
   "Shared job settings": "Gemeinsame Jobeinstellungen",
   "Show auto-detected": "Automatisch erkannte anzeigen",
+  "Show hidden folders": "Versteckte Ordner anzeigen",
   "Show submitter update notifications": "Aktualisierungsbenachrichtigungen des Submitters anzeigen",
   "Specify a job bundle directory or run the bundle command with the --browse flag": "Geben Sie ein Jobpaket-Verzeichnis an oder führen Sie den Bundle-Befehl mit dem Flag --browse aus",
   "Specify output directories": "Ausgabeverzeichnisse angeben",
