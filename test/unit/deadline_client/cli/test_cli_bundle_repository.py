@@ -85,11 +85,13 @@ class TestBundleUpload:
             )
         )
 
-        mock_s3_settings.return_value = MagicMock(
-            s3BucketName="test-bucket", rootPrefix="DeadlineCloud"
-        )
+        mock_session = MagicMock()
         mock_s3 = MagicMock()
-        mock_boto3_client.return_value = mock_s3
+        mock_session.client.return_value = mock_s3
+        mock_s3_settings.return_value = (
+            MagicMock(s3BucketName="test-bucket", rootPrefix="DeadlineCloud"),
+            mock_session,
+        )
 
         runner = CliRunner()
         result = runner.invoke(main, ["bundle", "upload", str(bundle)])
@@ -104,8 +106,9 @@ class TestBundleUpload:
         not_bundle = tmp_path / "empty"
         not_bundle.mkdir()
 
-        mock_s3_settings.return_value = MagicMock(
-            s3BucketName="test-bucket", rootPrefix="DeadlineCloud"
+        mock_s3_settings.return_value = (
+            MagicMock(s3BucketName="test-bucket", rootPrefix="DeadlineCloud"),
+            MagicMock(),
         )
 
         runner = CliRunner()

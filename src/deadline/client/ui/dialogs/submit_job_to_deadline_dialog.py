@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import sys
 import json
+import zipfile
 from typing import Any, Dict, Optional, Protocol
 import yaml
 
@@ -42,6 +44,13 @@ from ...exceptions import UserInitiatedCancel, NonValidInputError
 from ...job_bundle import create_job_history_bundle_dir
 from ...job_bundle.parameters import JobParameter
 from ...job_bundle.submission import AssetReferences
+from ...job_bundle.repository import (
+    S3_JOB_BUNDLES_PREFIX,
+    LocalBundleRepository,
+    _extract_bundle_info,
+    _parse_template,
+)
+from ....job_attachments._aws.deadline import get_queue
 from ..widgets.deadline_authentication_status_widget import DeadlineAuthenticationStatusWidget
 from ..widgets.job_attachments_tab import JobAttachmentsWidget
 from ..widgets.shared_job_settings_tab import SharedJobSettingsWidget
@@ -619,19 +628,6 @@ class SubmitJobToDeadlineDialog(QDialog):
 
     def on_share_bundle(self):
         """Archive the current bundle and share it on the queue."""
-        import io
-        import zipfile
-
-        import boto3
-
-        from ...config import get_setting
-        from ....job_attachments._aws.deadline import get_queue
-        from ...job_bundle.repository import (
-            S3_JOB_BUNDLES_PREFIX,
-            LocalBundleRepository,
-            _extract_bundle_info,
-            _parse_template,
-        )
 
         # First export the bundle locally
         settings = self.job_settings_type()
@@ -671,7 +667,8 @@ class SubmitJobToDeadlineDialog(QDialog):
         try:
             farm_id = get_setting("defaults.farm_id")
             queue_id = get_setting("defaults.queue_id")
-            queue_obj = get_queue(farm_id=farm_id, queue_id=queue_id)
+            boto3_session = api.get_boto3_session()
+            queue_obj = get_queue(farm_id=farm_id, queue_id=queue_id, session=boto3_session)
             if not queue_obj.jobAttachmentSettings:
                 QMessageBox.warning(
                     self, "Share failed", "Queue does not have job attachment settings configured."
@@ -742,7 +739,7 @@ class SubmitJobToDeadlineDialog(QDialog):
                         zf.write(local_path, arcname)
 
             buf.seek(0)
-            s3 = boto3.client("s3")
+            s3 = boto3_session.client("s3")
             s3.upload_fileobj(
                 buf,
                 s3_settings.s3BucketName,
@@ -752,8 +749,8 @@ class SubmitJobToDeadlineDialog(QDialog):
 
             QMessageBox.information(
                 self,
-                "Shared to S3",
-                f"Bundle shared to:\ns3://{s3_settings.s3BucketName}/{s3_key}",
+                "Shared",
+                f"Bundle shared to queue:\ns3://{s3_settings.s3BucketName}/{s3_key}",
             )
         except Exception as exc:
             QMessageBox.critical(self, "Share failed", f"Failed to upload bundle:\n{exc}")

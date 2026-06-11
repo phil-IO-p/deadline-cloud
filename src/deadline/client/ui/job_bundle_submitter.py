@@ -47,6 +47,10 @@ from .dialogs.submit_job_to_deadline_dialog import (
 from .widgets.job_bundle_settings_tab import JobBundleSettingsWidget
 from ..job_bundle.submission import AssetReferences
 from ..api._session import session_context
+from .. import api
+from ...job_attachments._aws.deadline import get_queue
+from ..config import get_setting
+from .dialogs.job_bundle_browser_dialog import JobBundleBrowserDialog
 
 logger = getLogger(__name__)
 
@@ -214,9 +218,6 @@ def show_job_bundle_submitter(
                 parent = main_windows[0]
 
     if not input_job_bundle_dir:
-        from .dialogs.job_bundle_browser_dialog import JobBundleBrowserDialog
-        from ..config import get_setting
-
         # Determine the default local browse directory
         default_dir = os.environ.get("DEADLINE_JOB_BUNDLE_DEFAULT_DIRECTORY", "")
         if not default_dir:
@@ -224,17 +225,17 @@ def show_job_bundle_submitter(
         if default_dir:
             default_dir = os.path.expanduser(default_dir)
 
-        # Try to get the queue's S3 bucket for S3 browsing
+        # Try to get the queue's S3 bucket for queue browsing
         s3_bucket = ""
         s3_prefix = ""
         s3_error = ""
+        boto3_session = None
         try:
             farm_id = get_setting("defaults.farm_id")
             queue_id = get_setting("defaults.queue_id")
             if farm_id and queue_id:
-                from ...job_attachments._aws.deadline import get_queue
-
-                queue = get_queue(farm_id=farm_id, queue_id=queue_id)
+                boto3_session = api.get_boto3_session()
+                queue = get_queue(farm_id=farm_id, queue_id=queue_id, session=boto3_session)
                 if queue.jobAttachmentSettings:
                     s3_bucket = queue.jobAttachmentSettings.s3BucketName
                     s3_prefix = queue.jobAttachmentSettings.rootPrefix
@@ -243,7 +244,7 @@ def show_job_bundle_submitter(
             else:
                 s3_error = "No farm or queue configured"
         except Exception as e:
-            logger.debug("Could not retrieve queue S3 settings for bundle browser", exc_info=True)
+            logger.debug("Could not retrieve queue settings for bundle browser", exc_info=True)
             s3_error = str(e)
 
         # Get the job history directory for the current profile
@@ -255,6 +256,7 @@ def show_job_bundle_submitter(
             s3_root_prefix=s3_prefix,
             s3_error=s3_error,
             job_history_dir=job_history_dir,
+            session=boto3_session,
             parent=parent,
         )
         if browser.exec_() != JobBundleBrowserDialog.Accepted or not browser.selected_path:

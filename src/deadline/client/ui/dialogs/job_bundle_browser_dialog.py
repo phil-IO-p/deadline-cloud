@@ -65,6 +65,7 @@ class JobBundleBrowserDialog(QDialog):
         s3_root_prefix: str = "",
         s3_error: str = "",
         job_history_dir: str = "",
+        session=None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent=parent)
@@ -78,7 +79,7 @@ class JobBundleBrowserDialog(QDialog):
         self._s3_available = bool(s3_bucket_name)
         if s3_bucket_name:
             self._s3_repo = S3BundleRepository(
-                bucket_name=s3_bucket_name, root_prefix=s3_root_prefix
+                bucket_name=s3_bucket_name, root_prefix=s3_root_prefix, session=session
             )
 
         self._history_dir = job_history_dir

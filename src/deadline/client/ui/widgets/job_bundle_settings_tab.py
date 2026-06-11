@@ -22,6 +22,8 @@ from qtpy.QtWidgets import (  # type: ignore
 
 from ..dataclasses import JobBundleSettings
 from ...config import get_setting
+from ... import api
+from ....job_attachments._aws.deadline import get_queue
 from .openjd_parameters_widget import OpenJDParametersWidget
 from ...job_bundle.submission import AssetReferences
 from ...job_bundle.loader import read_yaml_or_json_object, validate_directory_symlink_containment
@@ -91,17 +93,17 @@ class JobBundleSettingsWidget(QWidget):
         if default_dir:
             default_dir = os.path.expanduser(default_dir)
 
-        # Try to get the queue's S3 bucket for S3 browsing
+        # Try to get the queue's S3 bucket for queue browsing
         s3_bucket = ""
         s3_prefix = ""
         s3_error = ""
+        boto3_session = None
         try:
             farm_id = get_setting("defaults.farm_id")
             queue_id = get_setting("defaults.queue_id")
             if farm_id and queue_id:
-                from ....job_attachments._aws.deadline import get_queue
-
-                queue = get_queue(farm_id=farm_id, queue_id=queue_id)
+                boto3_session = api.get_boto3_session()
+                queue = get_queue(farm_id=farm_id, queue_id=queue_id, session=boto3_session)
                 if queue.jobAttachmentSettings:
                     s3_bucket = queue.jobAttachmentSettings.s3BucketName
                     s3_prefix = queue.jobAttachmentSettings.rootPrefix
@@ -121,6 +123,7 @@ class JobBundleSettingsWidget(QWidget):
             s3_root_prefix=s3_prefix,
             s3_error=s3_error,
             job_history_dir=job_history_dir,
+            session=boto3_session,
             parent=self,
         )
         if browser.exec_() != JobBundleBrowserDialog.Accepted or not browser.selected_path:

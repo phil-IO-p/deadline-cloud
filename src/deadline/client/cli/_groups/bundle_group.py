@@ -18,7 +18,6 @@ import shutil
 import os
 from dataclasses import fields
 
-import boto3
 import click
 from botocore.exceptions import ClientError
 
@@ -41,6 +40,7 @@ from ....job_attachments.exceptions import (
     AssetSyncCancelledError,
     MisconfiguredInputsError,
 )
+from ....job_attachments._aws.deadline import get_queue
 from ....job_attachments.models import JobAttachmentsFileSystem
 
 from ...exceptions import DeadlineOperationError, CreateJobWaiterCanceled
@@ -541,20 +541,19 @@ def _print_response(
 
 def _get_queue_s3_settings(config):
     """Get the queue's job attachment S3 settings from config."""
-    from ....job_attachments._aws.deadline import get_queue
-
     farm_id = config_file.get_setting("defaults.farm_id", config=config)
     queue_id = config_file.get_setting("defaults.queue_id", config=config)
     if not farm_id or not queue_id:
         raise DeadlineOperationError(
             "A default farm and queue must be configured. Run 'deadline config set defaults.farm_id <id>' and 'deadline config set defaults.queue_id <id>'."
         )
-    queue = get_queue(farm_id=farm_id, queue_id=queue_id)
+    boto3_session = api.get_boto3_session(config=config)
+    queue = get_queue(farm_id=farm_id, queue_id=queue_id, session=boto3_session)
     if not queue.jobAttachmentSettings:
         raise DeadlineOperationError(
             f"Queue {queue_id} does not have job attachment settings configured."
         )
-    return queue.jobAttachmentSettings
+    return queue.jobAttachmentSettings, boto3_session
 
 
 @cli_bundle.command(name="list")
@@ -593,10 +592,11 @@ def bundle_list(path, use_queue, no_archives, output, **args):
 
     if use_queue:
         config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
-        s3_settings = _get_queue_s3_settings(config)
+        s3_settings, boto3_session = _get_queue_s3_settings(config)
         repo: BundleRepository = S3BundleRepository(
             bucket_name=s3_settings.s3BucketName,
             root_prefix=s3_settings.rootPrefix,
+            session=boto3_session,
         )
     else:
         if path:
@@ -699,11 +699,12 @@ def bundle_cache_update(bundle_name, **args):
     """Re-download any stale cached bundles from the queue by checking ETags."""
 
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
-    s3_settings = _get_queue_s3_settings(config)
+    s3_settings, boto3_session = _get_queue_s3_settings(config)
 
     repo = S3BundleRepository(
         bucket_name=s3_settings.s3BucketName,
         root_prefix=s3_settings.rootPrefix,
+        session=boto3_session,
     )
 
     # List remote bundles to match against cache
@@ -779,7 +780,7 @@ def bundle_upload(job_bundle_dir, name, **args):
     Upload a job bundle to share on the queue as an .ojd archive.
     """
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
-    s3_settings = _get_queue_s3_settings(config)
+    s3_settings, boto3_session = _get_queue_s3_settings(config)
 
     job_bundle_dir = os.path.abspath(job_bundle_dir)
     if not is_job_bundle_dir(job_bundle_dir):
@@ -817,7 +818,7 @@ def bundle_upload(job_bundle_dir, name, **args):
     bundle_name = name or os.path.basename(job_bundle_dir)
     prefix = f"{s3_settings.rootPrefix.rstrip('/')}/{S3_JOB_BUNDLES_PREFIX}"
 
-    s3 = boto3.client("s3")
+    s3 = boto3_session.client("s3")
 
     # Archive and upload
     buf = io.BytesIO()
@@ -860,11 +861,12 @@ def bundle_download(bundle_name, output_dir, **args):
     """
 
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
-    s3_settings = _get_queue_s3_settings(config)
+    s3_settings, boto3_session = _get_queue_s3_settings(config)
 
     repo = S3BundleRepository(
         bucket_name=s3_settings.s3BucketName,
         root_prefix=s3_settings.rootPrefix,
+        session=boto3_session,
     )
 
     output_dir = os.path.abspath(output_dir)
