@@ -18,12 +18,15 @@ from qtpy.QtWidgets import (  # type: ignore
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
     QRadioButton,
     QScrollArea,
     QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -216,10 +219,15 @@ class JobBundleBrowserDialog(QDialog):
         self._preview_params_label = QLabel(tr("Parameters:"))
         self._preview_params_label.setStyleSheet("font-weight: bold; margin-top: 8px;")
         preview_layout.addWidget(self._preview_params_label)
-        self._preview_params = QLabel()
-        self._preview_params.setWordWrap(True)
-        preview_layout.addWidget(self._preview_params)
-        preview_layout.addStretch(1)
+        self._preview_params = QTableWidget()
+        self._preview_params.setColumnCount(3)
+        self._preview_params.setHorizontalHeaderLabels(["Name", "Type", "Value"])
+        self._preview_params.horizontalHeader().setStretchLastSection(True)
+        self._preview_params.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self._preview_params.verticalHeader().setVisible(False)
+        self._preview_params.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._preview_params.setSelectionMode(QTableWidget.NoSelection)
+        preview_layout.addWidget(self._preview_params, stretch=1)
 
         self._clear_preview()
 
@@ -452,16 +460,12 @@ class JobBundleBrowserDialog(QDialog):
 
         if info.parameters:
             self._preview_params_label.setVisible(True)
-            lines = []
-            for p in info.parameters:
-                pname = p.get("name", "?")
-                ptype = p.get("type", "?")
-                value = p.get("_display_value")
-                if value is not None:
-                    lines.append(f"  \u2022 {pname} ({ptype}) = {value}")
-                else:
-                    lines.append(f"  \u2022 {pname} ({ptype})")
-            self._preview_params.setText("\n".join(lines))
+            self._preview_params.setRowCount(len(info.parameters))
+            for row, p in enumerate(info.parameters):
+                self._preview_params.setItem(row, 0, QTableWidgetItem(p.get("name", "?")))
+                self._preview_params.setItem(row, 1, QTableWidgetItem(p.get("type", "?")))
+                value = p.get("_display_value", "")
+                self._preview_params.setItem(row, 2, QTableWidgetItem(str(value) if value else ""))
             self._preview_params.setVisible(True)
         else:
             self._preview_params_label.setVisible(False)
@@ -474,6 +478,7 @@ class JobBundleBrowserDialog(QDialog):
         self._preview_steps_label.setVisible(False)
         self._preview_steps.setVisible(False)
         self._preview_params_label.setVisible(False)
+        self._preview_params.setRowCount(0)
         self._preview_params.setVisible(False)
 
     def _mark_item_error(self, item: QStandardItem) -> None:
