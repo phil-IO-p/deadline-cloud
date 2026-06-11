@@ -560,10 +560,10 @@ def _get_queue_s3_settings(config):
 @cli_bundle.command(name="list")
 @click.argument("path", required=False)
 @click.option(
-    "--s3",
-    "use_s3",
+    "--queue",
+    "use_queue",
     is_flag=True,
-    help="List bundles from the queue's S3 job-bundles folder.",
+    help="List bundles shared on the queue.",
 )
 @click.option(
     "--no-archives",
@@ -580,7 +580,7 @@ def _get_queue_s3_settings(config):
     help="Output format. TEXT prints one name per line, JSON prints full details.",
 )
 @_handle_error
-def bundle_list(path, use_s3, no_archives, output, **args):
+def bundle_list(path, use_queue, no_archives, output, **args):
     """
     List job bundles.
 
@@ -588,10 +588,10 @@ def bundle_list(path, use_s3, no_archives, output, **args):
     With no arguments, lists bundles in the configured default local directory
     (settings.job_bundle_default_directory, or home if not set).
     With PATH, lists bundles in that local directory.
-    With --s3, lists bundles from the queue's S3 job-bundles folder.
+    With --queue, lists bundles shared on the queue.
     """
 
-    if use_s3:
+    if use_queue:
         config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
         s3_settings = _get_queue_s3_settings(config)
         repo: BundleRepository = S3BundleRepository(
@@ -630,7 +630,7 @@ def bundle_list(path, use_s3, no_archives, output, **args):
 @cli_bundle.group(name="cache")
 @_handle_error
 def cli_bundle_cache():
-    """Manage the local cache of S3 job bundles."""
+    """Manage the local cache of queue job bundles."""
 
 
 @cli_bundle_cache.command(name="clean")
@@ -638,7 +638,7 @@ def cli_bundle_cache():
 @click.option("--dry-run", is_flag=True, help="Show what would be removed without deleting.")
 @_handle_error
 def bundle_cache_clean(bundle_name, dry_run):
-    """Remove cached S3 bundle archives from the local cache."""
+    """Remove cached queue bundle archives from the local cache."""
 
     cache_root = _get_bundle_cache_dir()
     if not os.path.isdir(cache_root):
@@ -696,7 +696,7 @@ def bundle_cache_clean(bundle_name, dry_run):
 @click.option("--queue-id", help="The queue to use.")
 @_handle_error
 def bundle_cache_update(bundle_name, **args):
-    """Re-download any stale cached bundles from S3 by checking ETags."""
+    """Re-download any stale cached bundles from the queue by checking ETags."""
 
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
     s3_settings = _get_queue_s3_settings(config)
@@ -771,12 +771,12 @@ def bundle_cache_update(bundle_name, **args):
 @click.option("--queue-id", help="The queue to use.")
 @click.option(
     "--name",
-    help="Name for the archive in S3. Defaults to the bundle directory name.",
+    help="Name for the shared archive on the queue. Defaults to the bundle directory name.",
 )
 @_handle_error
 def bundle_upload(job_bundle_dir, name, **args):
     """
-    Upload a job bundle to the queue's S3 job-bundles folder as an .ojd archive.
+    Upload a job bundle to share on the queue as an .ojd archive.
     """
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
     s3_settings = _get_queue_s3_settings(config)
@@ -854,7 +854,7 @@ def bundle_upload(job_bundle_dir, name, **args):
 @_handle_error
 def bundle_download(bundle_name, output_dir, **args):
     """
-    Download a job bundle from the queue's S3 job-bundles folder.
+    Download a shared job bundle from the queue.
 
     BUNDLE_NAME is the name of the bundle (e.g. 'blender-render').
     """

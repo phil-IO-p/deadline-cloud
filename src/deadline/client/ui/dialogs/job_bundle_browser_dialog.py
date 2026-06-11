@@ -47,7 +47,7 @@ ROLE_IS_ARCHIVE = Qt.UserRole + 4
 
 class JobBundleBrowserDialog(QDialog):
     """
-    A dialog for browsing and selecting job bundles from local filesystem or S3.
+    A dialog for browsing and selecting job bundles from local filesystem or queue.
 
     Args:
         local_root: Default local directory to browse.
@@ -192,20 +192,20 @@ class JobBundleBrowserDialog(QDialog):
         bottom_layout = QVBoxLayout()
         bottom_layout.setContentsMargins(0, 8, 0, 0)
 
-        # Source toggle row — S3 first (primary use case), then History, then Local
+        # Source toggle row — Queue first (primary use case), then History, then Local
         source_row = QHBoxLayout()
         source_label = QLabel(tr("Source:"))
         source_row.addWidget(source_label)
         if self._s3_repo:
-            s3_label = f"S3 ({self._s3_repo._bucket})"
+            queue_label = tr("Queue")
         elif self._s3_error:
-            s3_label = "\u26a0 S3"
+            queue_label = "\u26a0 " + tr("Queue")
         else:
-            s3_label = "S3 (not configured)"
-        self._radio_s3 = QRadioButton(s3_label)
+            queue_label = tr("Queue") + " (not configured)"
+        self._radio_s3 = QRadioButton(queue_label)
         self._radio_s3.setEnabled(self._s3_available)
         if not self._s3_available and self._s3_error:
-            self._radio_s3.setToolTip(f"S3 unavailable: {self._s3_error}")
+            self._radio_s3.setToolTip(f"Queue unavailable: {self._s3_error}")
         self._radio_s3.toggled.connect(self._on_source_changed)
         source_row.addWidget(self._radio_s3)
         self._radio_history = QRadioButton(tr("History"))

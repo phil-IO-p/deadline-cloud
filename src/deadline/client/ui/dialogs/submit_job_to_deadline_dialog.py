@@ -618,7 +618,7 @@ class SubmitJobToDeadlineDialog(QDialog):
             )  # type: ignore[call-arg]
 
     def on_share_bundle(self):
-        """Archive the current bundle and upload it to the queue's S3 job-bundles folder."""
+        """Archive the current bundle and share it on the queue."""
         import io
         import zipfile
 
