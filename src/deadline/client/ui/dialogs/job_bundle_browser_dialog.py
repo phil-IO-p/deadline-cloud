@@ -118,6 +118,39 @@ class JobBundleBrowserDialog(QDialog):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
+        # Source toggle row — at the top so users select source before browsing
+        source_row = QHBoxLayout()
+        source_label = QLabel(tr("Source:"))
+        source_row.addWidget(source_label)
+        if self._s3_repo:
+            queue_label = tr("Queue")
+        elif self._s3_error:
+            queue_label = "\u26a0 " + tr("Queue")
+        else:
+            queue_label = tr("Queue") + " (not configured)"
+        self._radio_s3 = QRadioButton(queue_label)
+        self._radio_s3.setEnabled(self._s3_available)
+        if not self._s3_available and self._s3_error:
+            self._radio_s3.setToolTip(f"Queue unavailable: {self._s3_error}")
+        self._radio_s3.toggled.connect(self._on_source_changed)
+        source_row.addWidget(self._radio_s3)
+        self._radio_local = QRadioButton(tr("Local"))
+        self._radio_local.toggled.connect(self._on_source_changed)
+        source_row.addWidget(self._radio_local)
+        self._radio_history = QRadioButton(tr("History"))
+        self._radio_history.setEnabled(self._history_repo is not None)
+        self._radio_history.toggled.connect(self._on_source_changed)
+        source_row.addWidget(self._radio_history)
+        source_row.addStretch()
+        layout.addLayout(source_row)
+
+        # Default to Queue if available, otherwise Local
+        if self._s3_available:
+            self._radio_s3.setChecked(True)
+            self._current_repo = self._s3_repo
+        else:
+            self._radio_local.setChecked(True)
+
         # Main splitter: tree on left, preview on right
         splitter = QSplitter(Qt.Horizontal)
         layout.addWidget(splitter, stretch=1)
@@ -189,42 +222,9 @@ class JobBundleBrowserDialog(QDialog):
         splitter.addWidget(preview_scroll)
         splitter.setSizes([350, 350])
 
-        # Bottom: source toggle + path + buttons
+        # Bottom: path display + buttons
         bottom_layout = QVBoxLayout()
         bottom_layout.setContentsMargins(0, 8, 0, 0)
-
-        # Source toggle row — Queue first (primary use case), then History, then Local
-        source_row = QHBoxLayout()
-        source_label = QLabel(tr("Source:"))
-        source_row.addWidget(source_label)
-        if self._s3_repo:
-            queue_label = tr("Queue")
-        elif self._s3_error:
-            queue_label = "\u26a0 " + tr("Queue")
-        else:
-            queue_label = tr("Queue") + " (not configured)"
-        self._radio_s3 = QRadioButton(queue_label)
-        self._radio_s3.setEnabled(self._s3_available)
-        if not self._s3_available and self._s3_error:
-            self._radio_s3.setToolTip(f"Queue unavailable: {self._s3_error}")
-        self._radio_s3.toggled.connect(self._on_source_changed)
-        source_row.addWidget(self._radio_s3)
-        self._radio_history = QRadioButton(tr("History"))
-        self._radio_history.setEnabled(self._history_repo is not None)
-        self._radio_history.toggled.connect(self._on_source_changed)
-        source_row.addWidget(self._radio_history)
-        self._radio_local = QRadioButton(tr("Local"))
-        self._radio_local.toggled.connect(self._on_source_changed)
-        source_row.addWidget(self._radio_local)
-        source_row.addStretch()
-        bottom_layout.addLayout(source_row)
-
-        # Default to S3 if available, otherwise Local
-        if self._s3_available:
-            self._radio_s3.setChecked(True)
-            self._current_repo = self._s3_repo
-        else:
-            self._radio_local.setChecked(True)
 
         # Path row
         path_row = QHBoxLayout()
