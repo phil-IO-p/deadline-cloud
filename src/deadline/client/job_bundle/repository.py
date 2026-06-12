@@ -344,6 +344,13 @@ def _read_cache_meta(cache_dir: str) -> Optional[dict]:
     return None
 
 
+def _normalize_etag(etag: Optional[str]) -> str:
+    """Strip surrounding quotes from an ETag for consistent comparison."""
+    if not etag:
+        return ""
+    return etag.strip('"')
+
+
 def _write_cache_meta(cache_dir: str, etag: str, last_modified: str) -> None:
     meta_path = os.path.join(cache_dir, CACHE_META_FILENAME)
     with open(meta_path, "w", encoding="utf-8") as f:
@@ -484,7 +491,9 @@ class S3BundleRepository:
 
         if head:
             # Check local cache validity
-            cache_valid = meta and head.get("ETag") == meta.get("etag")
+            cache_valid = meta and _normalize_etag(head.get("ETag")) == _normalize_etag(
+                meta.get("etag")
+            )
 
             # Try S3 user metadata for preview (set by 'deadline bundle upload')
             s3_metadata = head.get("Metadata", {})
@@ -539,7 +548,7 @@ class S3BundleRepository:
         if meta:
             try:
                 head = self._s3.head_object(Bucket=self._bucket, Key=key)
-                if head.get("ETag") == meta.get("etag"):
+                if _normalize_etag(head.get("ETag")) == _normalize_etag(meta.get("etag")):
                     bundle_path = self._find_bundle_in_cache(cache_dir)
                     if bundle_path:
                         logger.info("Using cached bundle: %s", bundle_path)
