@@ -888,4 +888,9 @@ def bundle_download(bundle_name, output_dir, **args):
         raise DeadlineOperationError(msg)
 
     local_path = repo.download_full_bundle(match.path, output_dir)
-    click.echo(f"Downloaded bundle to: {local_path}")
+    # download_full_bundle resolves to cache; copy to user's output_dir
+    dest_path = os.path.join(output_dir, bundle_name)
+    if os.path.exists(dest_path):
+        shutil.rmtree(dest_path)
+    shutil.copytree(local_path, dest_path)
+    click.echo(f"Downloaded bundle to: {dest_path}")
