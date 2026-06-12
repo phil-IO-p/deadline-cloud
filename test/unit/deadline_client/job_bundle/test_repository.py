@@ -17,6 +17,7 @@ from deadline.client.job_bundle.repository import (
     _is_archive,
     _parse_template,
     _read_template_from_archive_path,
+    _safe_zip_extract,
     _strip_archive_ext,
 )
 
@@ -463,3 +464,43 @@ class TestLocalBundleRepository:
         bundle_dir.mkdir()
         result = LocalBundleRepository._read_parameter_values(str(bundle_dir))
         assert result is None
+
+import pytest
+
+
+class TestSafeZipExtract:
+    def test_rejects_absolute_path(self, tmp_path):
+        archive = tmp_path / "bad.zip"
+        with zipfile.ZipFile(str(archive), "w") as zf:
+            zf.writestr("/etc/passwd", "malicious")
+
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(str(archive), "r") as zf:
+            with pytest.raises(ValueError, match="absolute path"):
+                _safe_zip_extract(zf, str(dest))
+
+    def test_rejects_parent_directory_traversal(self, tmp_path):
+        archive = tmp_path / "bad.zip"
+        with zipfile.ZipFile(str(archive), "w") as zf:
+            zf.writestr("../../etc/passwd", "malicious")
+
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(str(archive), "r") as zf:
+            with pytest.raises(ValueError, match="outside target directory"):
+                _safe_zip_extract(zf, str(dest))
+
+    def test_allows_normal_archive(self, tmp_path):
+        archive = tmp_path / "good.zip"
+        with zipfile.ZipFile(str(archive), "w") as zf:
+            zf.writestr("template.yaml", "name: Test\n")
+            zf.writestr("subdir/file.txt", "hello")
+
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(str(archive), "r") as zf:
+            _safe_zip_extract(zf, str(dest))
+
+        assert (dest / "template.yaml").exists()
+        assert (dest / "subdir" / "file.txt").exists()

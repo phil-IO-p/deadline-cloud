@@ -782,9 +782,12 @@ class SubmitJobToDeadlineDialog(QDialog):
 
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for root, _dirs, files in os.walk(self.job_history_bundle_dir):
+                for root, dirs, files in os.walk(self.job_history_bundle_dir, followlinks=False):
+                    dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
                     for fname in files:
                         local_path = os.path.join(root, fname)
+                        if os.path.islink(local_path):
+                            continue
                         arcname = os.path.relpath(local_path, self.job_history_bundle_dir)
                         zf.write(local_path, arcname)
 

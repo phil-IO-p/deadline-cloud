@@ -55,11 +55,17 @@ def _strip_archive_ext(name: str) -> str:
 def _safe_zip_extract(zf: zipfile.ZipFile, dest_dir: str) -> None:
     """Extract a zip file, rejecting archives with entries that would escape dest_dir."""
     dest = os.path.realpath(dest_dir)
+
     for member in zf.namelist():
         if os.path.isabs(member):
             raise ValueError(f"Archive contains absolute path: {member}")
-        target = os.path.normpath(os.path.join(dest, member))
-        if not (target.startswith(dest + os.sep) or target == dest):
+        target = os.path.realpath(os.path.join(dest, member))
+        try:
+            common = os.path.commonpath([dest, target])
+        except ValueError:
+            # On Windows, different drives have no common path
+            raise ValueError(f"Archive entry would extract outside target directory: {member}")
+        if common != dest:
             raise ValueError(f"Archive entry would extract outside target directory: {member}")
     zf.extractall(dest_dir)
 

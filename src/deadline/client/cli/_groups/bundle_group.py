@@ -869,9 +869,14 @@ def bundle_upload(job_bundle_dir, name, **args):
     # Archive and upload
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, _dirs, files in os.walk(job_bundle_dir):
+        for root, dirs, files in os.walk(job_bundle_dir, followlinks=False):
+            # Skip symlinked directories
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
             for fname in files:
                 local_path = os.path.join(root, fname)
+                if os.path.islink(local_path):
+                    logger.warning("Skipping symlink: %s", local_path)
+                    continue
                 arcname = os.path.relpath(local_path, job_bundle_dir)
                 zf.write(local_path, arcname)
 
