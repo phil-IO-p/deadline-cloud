@@ -28,6 +28,14 @@ from ...job_bundle.loader import is_job_bundle_dir
 from ...job_bundle.repository import (
     BundleRepository,
     LocalBundleRepository,
+    METADATA_KEY_DESC,
+    METADATA_KEY_NAME,
+    METADATA_KEY_PARAMS,
+    METADATA_KEY_STEPS,
+    METADATA_LIMIT_DESC,
+    METADATA_LIMIT_NAME,
+    METADATA_LIMIT_PARAMS,
+    METADATA_LIMIT_STEPS,
     S3BundleRepository,
     S3_JOB_BUNDLES_PREFIX,
     _extract_bundle_info,
@@ -539,6 +547,25 @@ def _print_response(
             click.echo("Job submission canceled.")
 
 
+def _truncate_metadata(value: str, limit: int, field: str) -> str:
+    """Truncate a metadata value, warning if truncation occurs.
+
+    S3 user-defined metadata is limited to 2 KB total (sum of all UTF-8 encoded keys and values).
+    We apply conservative per-field limits to stay well within that budget.
+    See: https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html#UserMetadata
+    """
+    if len(value) > limit:
+        click.echo(
+            click.style(
+                f"Warning: Bundle metadata '{field}' truncated from {len(value)} to {limit} characters",
+                fg="yellow",
+            ),
+            err=True,
+        )
+        return value[: limit - 3] + "..."
+    return value
+
+
 def _get_queue_s3_settings(config):
     """Get the queue's job attachment S3 settings from config."""
     farm_id = config_file.get_setting("defaults.farm_id", config=config)
@@ -801,18 +828,26 @@ def bundle_upload(job_bundle_dir, name, **args):
                     job_bundle_dir,
                     LocalBundleRepository._read_parameter_values(job_bundle_dir),
                 )
-                bundle_metadata["bundle-name"] = info.name[:256]
+                bundle_metadata[METADATA_KEY_NAME] = _truncate_metadata(
+                    info.name, METADATA_LIMIT_NAME, METADATA_KEY_NAME
+                )
                 if info.description:
                     # S3 metadata values must be valid HTTP header values (no newlines)
                     desc = " ".join(info.description.split())
-                    bundle_metadata["bundle-description"] = desc[:512]
+                    bundle_metadata[METADATA_KEY_DESC] = _truncate_metadata(
+                        desc, METADATA_LIMIT_DESC, METADATA_KEY_DESC
+                    )
                 if info.step_names:
-                    bundle_metadata["bundle-steps"] = ",".join(info.step_names)[:512]
+                    bundle_metadata[METADATA_KEY_STEPS] = _truncate_metadata(
+                        ",".join(info.step_names), METADATA_LIMIT_STEPS, METADATA_KEY_STEPS
+                    )
                 if info.parameters:
                     param_strs = [
                         f"{p.get('name', '?')}:{p.get('type', '?')}" for p in info.parameters
                     ]
-                    bundle_metadata["bundle-parameters"] = ",".join(param_strs)[:512]
+                    bundle_metadata[METADATA_KEY_PARAMS] = _truncate_metadata(
+                        ",".join(param_strs), METADATA_LIMIT_PARAMS, METADATA_KEY_PARAMS
+                    )
             break
 
     bundle_name = name or os.path.basename(job_bundle_dir)

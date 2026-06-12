@@ -141,10 +141,10 @@ class TestExtractBundleInfo:
 class TestBundleInfoFromS3Metadata:
     def test_full_metadata(self):
         metadata = {
-            "bundle-name": "My Bundle",
-            "bundle-description": "A description",
-            "bundle-steps": "Step1,Step2",
-            "bundle-parameters": "Frames:STRING,Output:PATH",
+            "ojd-name": "My Bundle",
+            "ojd-desc": "A description",
+            "ojd-steps": "Step1,Step2",
+            "ojd-params": "Frames:STRING,Output:PATH",
         }
         info = _bundle_info_from_s3_metadata(metadata, "s3://bucket/key")
         assert info is not None
@@ -160,7 +160,7 @@ class TestBundleInfoFromS3Metadata:
         assert info is None
 
     def test_name_only(self):
-        info = _bundle_info_from_s3_metadata({"bundle-name": "Simple"}, "s3://bucket/key")
+        info = _bundle_info_from_s3_metadata({"ojd-name": "Simple"}, "s3://bucket/key")
         assert info is not None
         assert info.name == "Simple"
         assert info.step_names == []

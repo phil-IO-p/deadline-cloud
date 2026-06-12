@@ -26,6 +26,19 @@ S3_JOB_BUNDLES_PREFIX = "job-bundles"
 ARCHIVE_EXTENSION = ".ojd"
 CACHE_META_FILENAME = ".bundle_cache_meta.json"
 
+# S3 user-defined metadata is limited to 2 KB total (keys + values, UTF-8 encoded).
+# Keys include the "x-amz-meta-" prefix (12 bytes) added by S3.
+# Budget: 4 keys × (12 + ~9 avg key len) = ~83 bytes for keys, leaving ~1,965 for values.
+# See: https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html#UserMetadata
+METADATA_KEY_NAME = "ojd-name"
+METADATA_KEY_DESC = "ojd-desc"
+METADATA_KEY_STEPS = "ojd-steps"
+METADATA_KEY_PARAMS = "ojd-params"
+METADATA_LIMIT_NAME = 256
+METADATA_LIMIT_DESC = 480
+METADATA_LIMIT_STEPS = 480
+METADATA_LIMIT_PARAMS = 700
+
 
 def _is_archive(name: str) -> bool:
     """Check if a filename is an .ojd archive."""
@@ -312,12 +325,12 @@ def _write_cache_meta(cache_dir: str, etag: str, last_modified: str) -> None:
 
 def _bundle_info_from_s3_metadata(metadata: dict, path: str) -> Optional[BundleInfo]:
     """Try to construct BundleInfo from S3 user metadata set during upload.
-    Returns None if the required 'bundle-name' key is missing."""
-    name = metadata.get("bundle-name")
+    Returns None if the required 'ojd-name' key is missing."""
+    name = metadata.get(METADATA_KEY_NAME)
     if not name:
         return None
     params = []
-    params_str = metadata.get("bundle-parameters", "")
+    params_str = metadata.get(METADATA_KEY_PARAMS, "")
     if params_str:
         for p in params_str.split(","):
             parts = p.split(":", 1)
@@ -326,8 +339,8 @@ def _bundle_info_from_s3_metadata(metadata: dict, path: str) -> Optional[BundleI
     return BundleInfo(
         path=path,
         name=name,
-        description=metadata.get("bundle-description", ""),
-        step_names=[s for s in metadata.get("bundle-steps", "").split(",") if s],
+        description=metadata.get(METADATA_KEY_DESC, ""),
+        step_names=[s for s in metadata.get(METADATA_KEY_STEPS, "").split(",") if s],
         parameters=params,
     )
 

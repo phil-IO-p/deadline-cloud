@@ -47,6 +47,14 @@ from ...job_bundle.submission import AssetReferences
 from ...job_bundle.repository import (
     S3_JOB_BUNDLES_PREFIX,
     LocalBundleRepository,
+    METADATA_KEY_DESC,
+    METADATA_KEY_NAME,
+    METADATA_KEY_PARAMS,
+    METADATA_KEY_STEPS,
+    METADATA_LIMIT_DESC,
+    METADATA_LIMIT_NAME,
+    METADATA_LIMIT_PARAMS,
+    METADATA_LIMIT_STEPS,
     _extract_bundle_info,
     _parse_template,
 )
@@ -60,6 +68,22 @@ from ._types import JobBundlePurpose
 from ._help_dialog import _HelpDialog
 
 logger = logging.getLogger(__name__)
+
+
+def _truncate_metadata(value: str, limit: int, field: str) -> str:
+    """Truncate a metadata value, warning if truncation occurs.
+
+    S3 user-defined metadata is limited to 2 KB total (sum of all UTF-8 encoded keys and values).
+    We apply conservative per-field limits to stay well within that budget.
+    See: https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html#UserMetadata
+    """
+    if len(value) > limit:
+        logger.warning(
+            "Bundle metadata '%s' truncated from %d to %d characters", field, len(value), limit
+        )
+        return value[: limit - 3] + "..."
+    return value
+
 
 # initialize early so once the UI opens, things are already initialized
 DeadlineAuthenticationStatus.getInstance()
@@ -690,18 +714,25 @@ class SubmitJobToDeadlineDialog(QDialog):
                     pv = LocalBundleRepository._read_parameter_values(self.job_history_bundle_dir)
                     info = _extract_bundle_info(template, self.job_history_bundle_dir, pv)
                     # Use settings.name which is already resolved by the UI
-                    bundle_metadata["bundle-name"] = settings.name[:256]
+                    bundle_metadata[METADATA_KEY_NAME] = _truncate_metadata(
+                        settings.name, METADATA_LIMIT_NAME, METADATA_KEY_NAME
+                    )
                     if info.description:
-                        bundle_metadata["bundle-description"] = " ".join(info.description.split())[
-                            :512
-                        ]
+                        desc = " ".join(info.description.split())
+                        bundle_metadata[METADATA_KEY_DESC] = _truncate_metadata(
+                            desc, METADATA_LIMIT_DESC, METADATA_KEY_DESC
+                        )
                     if info.step_names:
-                        bundle_metadata["bundle-steps"] = ",".join(info.step_names)[:512]
+                        bundle_metadata[METADATA_KEY_STEPS] = _truncate_metadata(
+                            ",".join(info.step_names), METADATA_LIMIT_STEPS, METADATA_KEY_STEPS
+                        )
                     if info.parameters:
                         param_strs = [
                             f"{p.get('name', '?')}:{p.get('type', '?')}" for p in info.parameters
                         ]
-                        bundle_metadata["bundle-parameters"] = ",".join(param_strs)[:512]
+                        bundle_metadata[METADATA_KEY_PARAMS] = _truncate_metadata(
+                            ",".join(param_strs), METADATA_LIMIT_PARAMS, METADATA_KEY_PARAMS
+                        )
                 break
 
         # Archive and upload
@@ -724,7 +755,9 @@ class SubmitJobToDeadlineDialog(QDialog):
                 resolved_name = os.path.basename(
                     settings.input_job_bundle_dir
                 )  # fallback to dir name
-            bundle_metadata["bundle-name"] = resolved_name[:256]
+            bundle_metadata[METADATA_KEY_NAME] = _truncate_metadata(
+                resolved_name, METADATA_LIMIT_NAME, METADATA_KEY_NAME
+            )
 
             bundle_name = resolved_name.replace(" ", "_").replace("/", "_")
             prefix = f"{s3_settings.rootPrefix.rstrip('/')}/{S3_JOB_BUNDLES_PREFIX}"

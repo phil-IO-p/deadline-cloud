@@ -12,7 +12,7 @@ from logging import getLogger
 from typing import Optional
 
 from qtpy.QtCore import Qt, QModelIndex, QSortFilterProxyModel, QTimer, Signal  # type: ignore
-from qtpy.QtGui import QStandardItemModel, QStandardItem  # type: ignore
+from qtpy.QtGui import QColor, QStandardItemModel, QStandardItem  # type: ignore
 from qtpy.QtWidgets import (  # type: ignore
     QCheckBox,
     QDialog,
@@ -470,12 +470,24 @@ class JobBundleBrowserDialog(QDialog):
 
         if info.parameters:
             self._preview_params_label.setVisible(True)
-            self._preview_params.setRowCount(len(info.parameters))
-            for row, p in enumerate(info.parameters):
+            # Detect if parameters were truncated in metadata
+            truncated = any(
+                p.get("name", "").endswith("...") or p.get("type", "").endswith("...")
+                for p in info.parameters
+            )
+            # Drop the last entry if it's garbled from truncation
+            params = info.parameters[:-1] if truncated else info.parameters
+            row_count = len(params) + (1 if truncated else 0)
+            self._preview_params.setRowCount(row_count)
+            for row, p in enumerate(params):
                 self._preview_params.setItem(row, 0, QTableWidgetItem(p.get("name", "?")))
                 self._preview_params.setItem(row, 1, QTableWidgetItem(p.get("type", "?")))
                 value = p.get("_display_value", "")
                 self._preview_params.setItem(row, 2, QTableWidgetItem(str(value) if value else ""))
+            if truncated:
+                truncation_item = QTableWidgetItem("\u2026 additional parameters not shown")
+                truncation_item.setForeground(QColor("gray"))
+                self._preview_params.setItem(len(params), 0, truncation_item)
             self._preview_params.setVisible(True)
         else:
             self._preview_params_label.setVisible(False)

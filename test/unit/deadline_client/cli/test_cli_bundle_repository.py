@@ -10,6 +10,12 @@ from click.testing import CliRunner
 from unittest.mock import MagicMock, patch
 
 from deadline.client.cli import main
+from deadline.client.job_bundle.repository import (
+    METADATA_LIMIT_DESC,
+    METADATA_LIMIT_NAME,
+    METADATA_LIMIT_PARAMS,
+    METADATA_LIMIT_STEPS,
+)
 
 BUNDLE_GROUP = "deadline.client.cli._groups.bundle_group"
 
@@ -170,3 +176,96 @@ class TestBundleCacheClean:
         assert "Removed cached bundle: bundle-a" in result.output
         assert not bundle_a.exists()
         assert bundle_b.exists()
+
+
+class TestMetadataTruncation:
+    @patch(f"{BUNDLE_GROUP}._apply_cli_options_to_config")
+    @patch(f"{BUNDLE_GROUP}._get_queue_s3_settings")
+    def test_upload_truncates_metadata_with_warning(
+        self, mock_s3_settings, mock_config, tmp_path, capsys
+    ):
+        bundle = tmp_path / "big-bundle"
+        bundle.mkdir()
+        (bundle / "template.yaml").write_text(
+            yaml.dump(
+                {
+                    "specificationVersion": "jobtemplate-2023-09",
+                    "name": "A" * 300,
+                    "description": "D" * 600,
+                    "steps": [{"name": f"Step_{i:03d}_Long"} for i in range(40)],
+                    "parameterDefinitions": [
+                        {"name": f"Param_{i:03d}_Long", "type": "STRING"} for i in range(50)
+                    ],
+                }
+            )
+        )
+
+        mock_session = MagicMock()
+        mock_s3 = MagicMock()
+        mock_session.client.return_value = mock_s3
+        mock_s3_settings.return_value = (
+            MagicMock(s3BucketName="test-bucket", rootPrefix="DC"),
+            mock_session,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["bundle", "upload", str(bundle)])
+        assert result.exit_code == 0, result.output
+
+        # Verify warnings were emitted
+        assert "ojd-name" in result.output
+        assert "ojd-desc" in result.output
+        assert "ojd-steps" in result.output
+        assert "ojd-params" in result.output
+
+        # Verify metadata values respect limits
+        call_args = mock_s3.upload_fileobj.call_args
+        metadata = call_args[1]["ExtraArgs"]["Metadata"]
+        assert len(metadata["ojd-name"]) <= METADATA_LIMIT_NAME
+        assert len(metadata["ojd-desc"]) <= METADATA_LIMIT_DESC
+        assert len(metadata["ojd-steps"]) <= METADATA_LIMIT_STEPS
+        assert len(metadata["ojd-params"]) <= METADATA_LIMIT_PARAMS
+
+        # Verify truncated values end with "..."
+        assert metadata["ojd-name"].endswith("...")
+        assert metadata["ojd-desc"].endswith("...")
+        assert metadata["ojd-steps"].endswith("...")
+        assert metadata["ojd-params"].endswith("...")
+
+    @patch(f"{BUNDLE_GROUP}._apply_cli_options_to_config")
+    @patch(f"{BUNDLE_GROUP}._get_queue_s3_settings")
+    def test_upload_no_truncation_when_within_limits(self, mock_s3_settings, mock_config, tmp_path):
+        bundle = tmp_path / "small-bundle"
+        bundle.mkdir()
+        (bundle / "template.yaml").write_text(
+            yaml.dump(
+                {
+                    "specificationVersion": "jobtemplate-2023-09",
+                    "name": "Short Name",
+                    "description": "Brief",
+                    "steps": [{"name": "Render"}],
+                    "parameterDefinitions": [{"name": "Frames", "type": "STRING"}],
+                }
+            )
+        )
+
+        mock_session = MagicMock()
+        mock_s3 = MagicMock()
+        mock_session.client.return_value = mock_s3
+        mock_s3_settings.return_value = (
+            MagicMock(s3BucketName="test-bucket", rootPrefix="DC"),
+            mock_session,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["bundle", "upload", str(bundle)])
+        assert result.exit_code == 0, result.output
+
+        # No warnings
+        assert "truncated" not in result.output.lower()
+
+        # Values stored as-is without "..."
+        call_args = mock_s3.upload_fileobj.call_args
+        metadata = call_args[1]["ExtraArgs"]["Metadata"]
+        assert metadata["ojd-name"] == "Short Name"
+        assert not metadata["ojd-name"].endswith("...")
