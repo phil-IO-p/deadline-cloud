@@ -417,6 +417,21 @@ Symlink protection during upload:
 
 - `os.walk(followlinks=False)` is used when archiving bundles. Symlinked files and directories are skipped to prevent unintended inclusion of files outside the bundle directory.
 
+### Bundle Name Validation
+
+Upload rejects bundles with invalid names:
+
+- Empty names or names consisting only of whitespace/slashes are rejected with an error directing the user to `--name`.
+- The full S3 key (prefix + name + `.ojd`) is validated against S3's 1024-character key limit.
+- Control characters (0x00–0x1F, 0x7F) are considered invalid.
+
+On download, the bundle name is sanitized for the local filesystem in a platform-specific manner:
+
+- **POSIX** (macOS/Linux): only `/` and null bytes are replaced with `_`. Characters like `:`, `*`, `?` are preserved since they are valid filenames.
+- **Windows**: `\ / : * ? " < > |` and control characters are replaced with `_`.
+
+This means the S3 key preserves the original name as-is (all characters are valid in S3 keys), and only the local directory name is adjusted for the user's OS.
+
 ### S3 Considerations
 
 - **Authentication**: S3 browsing and CLI commands use `api.get_boto3_session()` which respects the configured AWS profile in `~/.deadline/config`. The `S3BundleRepository.from_config()` factory method encapsulates session creation, queue lookup, and settings extraction in one place. No separate auth flow.
