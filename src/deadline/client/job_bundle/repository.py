@@ -19,6 +19,12 @@ from typing import Optional, Protocol
 
 import yaml
 
+from ..api import get_boto3_session
+from ..config import config_file
+from ..config.config_file import get_cache_directory
+from ..exceptions import DeadlineOperationError
+from ...job_attachments._aws.deadline import get_queue
+
 logger = getLogger(__name__)
 
 TEMPLATE_FILENAMES = ("template.yaml", "template.json")
@@ -297,8 +303,6 @@ class LocalBundleRepository:
 
 def _get_bundle_cache_dir() -> str:
     """Get the root cache directory for S3 bundle archives."""
-    from ..config.config_file import get_cache_directory
-
     return os.path.join(get_cache_directory(), "job-bundles")
 
 
@@ -364,6 +368,29 @@ class S3BundleRepository:
         self._prefix = f"{base}/{S3_JOB_BUNDLES_PREFIX}/"
         self._session = session or _boto3.Session()
         self._s3 = self._session.client("s3")
+
+    @classmethod
+    def from_config(cls, config=None) -> "S3BundleRepository":
+        """Create an S3BundleRepository from the user's Deadline Cloud configuration.
+
+        Handles session creation, queue lookup, and attachment settings extraction.
+        Raises DeadlineOperationError if farm/queue is not configured or has no attachments.
+        """
+        farm_id = config_file.get_setting("defaults.farm_id", config=config)
+        queue_id = config_file.get_setting("defaults.queue_id", config=config)
+        if not farm_id or not queue_id:
+            raise DeadlineOperationError("A default farm and queue must be configured.")
+        session = get_boto3_session(config=config)
+        queue = get_queue(farm_id=farm_id, queue_id=queue_id, session=session)
+        if not queue.jobAttachmentSettings:
+            raise DeadlineOperationError(
+                f"Queue {queue_id} does not have job attachment settings configured."
+            )
+        return cls(
+            bucket_name=queue.jobAttachmentSettings.s3BucketName,
+            root_prefix=queue.jobAttachmentSettings.rootPrefix,
+            session=session,
+        )
 
     def root_path(self) -> str:
         return f"s3://{self._bucket}/{self._prefix}"

@@ -8,6 +8,7 @@ import json
 import os
 import zipfile
 
+import pytest
 import yaml
 
 from deadline.client.job_bundle.repository import (
@@ -464,8 +465,6 @@ class TestLocalBundleRepository:
         bundle_dir.mkdir()
         result = LocalBundleRepository._read_parameter_values(str(bundle_dir))
         assert result is None
-
-import pytest
 
 
 class TestSafeZipExtract:

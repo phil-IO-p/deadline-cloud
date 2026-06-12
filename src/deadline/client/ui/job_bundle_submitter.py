@@ -31,6 +31,7 @@ from ..job_bundle.loader import (
     validate_directory_symlink_containment,
 )
 from ..job_bundle.saver import save_yaml_or_json_to_file
+from ..job_bundle.repository import S3BundleRepository
 from ..job_bundle.parameters import (
     JobParameter,
     apply_job_parameters,
@@ -47,8 +48,6 @@ from .dialogs.submit_job_to_deadline_dialog import (
 from .widgets.job_bundle_settings_tab import JobBundleSettingsWidget
 from ..job_bundle.submission import AssetReferences
 from ..api._session import session_context
-from .. import api
-from ...job_attachments._aws.deadline import get_queue
 from ..config import get_setting
 from .dialogs.job_bundle_browser_dialog import JobBundleBrowserDialog
 
@@ -225,24 +224,11 @@ def show_job_bundle_submitter(
         if default_dir:
             default_dir = os.path.expanduser(default_dir)
 
-        # Try to get the queue's S3 bucket for queue browsing
-        s3_bucket = ""
-        s3_prefix = ""
+        # Try to get the queue repo for queue browsing
+        queue_repo = None
         s3_error = ""
-        boto3_session = None
         try:
-            farm_id = get_setting("defaults.farm_id")
-            queue_id = get_setting("defaults.queue_id")
-            if farm_id and queue_id:
-                boto3_session = api.get_boto3_session()
-                queue = get_queue(farm_id=farm_id, queue_id=queue_id, session=boto3_session)
-                if queue.jobAttachmentSettings:
-                    s3_bucket = queue.jobAttachmentSettings.s3BucketName
-                    s3_prefix = queue.jobAttachmentSettings.rootPrefix
-                else:
-                    s3_error = "Queue does not have job attachment settings"
-            else:
-                s3_error = "No farm or queue configured"
+            queue_repo = S3BundleRepository.from_config()
         except Exception as e:
             logger.debug("Could not retrieve queue settings for bundle browser", exc_info=True)
             s3_error = str(e)
@@ -251,12 +237,10 @@ def show_job_bundle_submitter(
         job_history_dir = os.path.expanduser(get_setting("settings.job_history_dir"))
 
         browser = JobBundleBrowserDialog(
-            local_root=default_dir,
-            s3_bucket_name=s3_bucket,
-            s3_root_prefix=s3_prefix,
-            s3_error=s3_error,
-            job_history_dir=job_history_dir,
-            session=boto3_session,
+            queue_source=queue_repo,
+            queue_error=s3_error,
+            local_source=default_dir,
+            history_source=job_history_dir,
             parent=parent,
         )
         if browser.exec_() != JobBundleBrowserDialog.Accepted or not browser.selected_path:

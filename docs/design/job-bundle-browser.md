@@ -71,7 +71,7 @@ class BundleRepository(Protocol):
 Two implementations:
 
 - `LocalBundleRepository` — walks the local filesystem. Lists directories and archive files. Directories are bundles if they contain `template.yaml`/`template.json`. Archives are always shown as bundles (validated on preview). Provides `extract_bundle()` for extracting archives to a local directory.
-- `S3BundleRepository` — lists objects and prefixes under the queue's job attachment bucket at `{rootPrefix}/job-bundles/`. Only `.ojd` archives are recognized as bundles; subfolders are shown for navigation only. Provides `resolve_bundle()` which handles archive download+cache+extract.
+- `S3BundleRepository` — lists objects and prefixes under the queue's job attachment bucket at `{rootPrefix}/job-bundles/`. Only `.ojd` archives are recognized as bundles; subfolders are shown for navigation only. Provides `resolve_bundle()` which handles archive download+cache+extract. The `from_config()` classmethod encapsulates all initialization logic (session creation, queue lookup, settings extraction) to avoid duplicating this across callers.
 
 ### S3 Bucket Convention
 
@@ -131,19 +131,16 @@ Where `{hash}` is a truncated SHA-256 of `{bucket}/{s3-key}` to ensure uniquenes
 
 When `deadline bundle upload` uploads an archive, it attaches bundle metadata as S3 user metadata on the object:
 
-- `bundle-name`: The template's `name` field
-- `bundle-description`: The template's `description` field (newlines collapsed to spaces)
-- `bundle-steps`: Comma-separated list of step names
-- `bundle-parameters`: Comma-separated `name:type` pairs
+- `ojd-name`: The template's `name` field (limit: 256 chars)
+- `ojd-desc`: The template's `description` field, newlines collapsed to spaces (limit: 480 chars)
+- `ojd-steps`: Comma-separated list of step names (limit: 480 chars)
+- `ojd-params`: Comma-separated `name:type` pairs (limit: 700 chars)
+
+These limits are defined as constants in `repository.py` (`METADATA_LIMIT_NAME`, `METADATA_LIMIT_DESC`, `METADATA_LIMIT_STEPS`, `METADATA_LIMIT_PARAMS`). S3 user-defined metadata is limited to 2 KB total (sum of all UTF-8 encoded keys and values, including the `x-amz-meta-` prefix). The per-field limits are chosen to stay within this budget even at maximum usage. See: https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html#UserMetadata
+
+When truncation occurs, the CLI emits a yellow warning (e.g. `Warning: Bundle metadata 'ojd-params' truncated from 899 to 700 characters`) and the truncated value ends with `...` to make it visually obvious in the preview that information was cut off. The parameters table in the browser dialog detects truncated metadata and shows an "… additional parameters not shown" row.
 
 This metadata is returned by `head_object`, which is already called for ETag validation. This means preview of uploaded archives requires **zero downloads** — a single `head_object` provides both cache validation and all preview information.
-
-The preview priority chain for S3 archives:
-1. **S3 user metadata** from `head_object` → instant, no download
-2. **Local cache** if ETag matches → read template from disk
-3. **Download archive** → parse template, populate cache (fallback for archives not uploaded via the CLI)
-
-S3 user metadata has a 2KB total limit, which is sufficient for typical bundle metadata. Per-field limits: `bundle-name` is truncated to 256 characters, `bundle-description`, `bundle-steps`, and `bundle-parameters` are each truncated to 512 characters.
 
 ### Detection: What Is a Job Bundle?
 
@@ -164,6 +161,9 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Job Bundle Browser                                         │
+├─────────────────────────────────────────────────────────────┤
+│  Source: (•) Queue  ( ) Local  ( ) History                  │
+│  ☐ Show hidden folders                                      │
 ├────────────────────────────────┬────────────────────────────┤
 │  [Filter bundles...         ]  │  Name: Blender Render      │
 │  📁 my-bundles/               │  Description: Renders a    │
@@ -173,17 +173,22 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 │      📦 experimental-job      │    • RenderBlender         │
 │    📦 simple-job/             │                            │
 │                               │  Parameters:               │
-│                               │    • BlenderSceneFile (PATH)│
-│                               │    • Frames (STRING)       │
-│                               │    • OutputDir (PATH)      │
-│                               │    • Format (STRING)       │
+│                               │  ┌──────────┬──────┬─────┐ │
+│                               │  │ Name     │ Type │ Val │ │
+│                               │  ├──────────┼──────┼─────┤ │
+│                               │  │ Frames   │ STR  │     │ │
+│                               │  │ OutputDir│ PATH │     │ │
+│                               │  └──────────┴──────┴─────┘ │
 │                               │                            │
 ├────────────────────────────────┴────────────────────────────┤
-│  Source: ( ) Local  (•) S3 (my-farm-bucket)  ( ) History   │
 │  Path:  [/job-bundles/                      ]               │
 │                                          [Cancel] [Select]  │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Top bar** — Source selection and options:
+- Radio toggle between Queue, Local, and History sources. Queue is selected by default when available; otherwise Local is selected. Queue option is disabled if the queue has no job attachment settings or access fails. When Queue is unavailable, an inline warning label appears below the radio buttons explaining why (e.g. "⚠ **Queue browsing unavailable:** AccessDeniedException...").
+- "Show hidden folders" checkbox — hidden by default, toggling refreshes the tree to include/exclude dot-prefixed directories.
 
 **Left panel** — Filter and navigable tree view:
 - A text filter at the top that narrows the tree as you type. Case-insensitive, matches against entry names. Uses recursive filtering so parent folders remain visible when a child matches. The tree auto-expands when filtering to show results.
@@ -191,25 +196,25 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 - Clicking a folder clears any active filter, expands the folder to show its children, and scrolls it to the top of the view. This makes the search-then-navigate flow natural: search for a folder, click it, see its contents.
 - Job bundles are leaf nodes (selectable, not expandable).
 - Non-bundle, non-archive files are hidden.
+- Hidden folders (names starting with `.`) are hidden by default; toggled via the checkbox.
 
 **Right panel** — Preview (shown when a bundle is selected, scrollable):
 - **Name**: From the template's `name` field, shown as-is (with `{{Param.X}}` references unresolved).
 - **Description**: From the template's `description` field, if present.
 - **Steps**: List of step names from the template, in definition order.
-- **Parameters**: Name, type, and value of each parameter definition, in definition order. Values are resolved in priority order: `parameter_values.yaml`/`.json` > template `default` > blank. For S3 archives, values are available once the bundle is cached locally (first click caches, subsequent clicks show values).
+- **Parameters**: Rendered as a table with Name, Type, and Value columns. Columns resize to fit content, with the last column stretching. If parameters were truncated in S3 metadata, the last garbled entry is dropped and a gray "… additional parameters not shown" row is appended.
 
 **Bottom bar**:
-- Radio toggle between Local, S3, and Job History sources. S3 is selected by default when available; otherwise Local is selected. S3 option shows the bucket name from the queue and is disabled if the queue has no job attachment settings or S3 access fails (with a tooltip explaining why). Job History browses the `settings.job_history_dir` for the current AWS profile, showing previously submitted bundles; it is disabled if the job history directory does not exist on disk.
 - Path display showing the current browse location.
 - Cancel and Select buttons. Select is enabled only when a valid bundle is highlighted.
 
 ### Share Button
 
-The submitter dialog includes a "Share" button alongside the existing "Export bundle" and "Submit" buttons. Clicking "Share" packages the current job bundle as an `.ojd` archive and uploads it to the queue's S3 `job-bundles/` folder, making it available to the team via the browser's S3 source. The bundle name defaults to the job name, with `{{Param.X}}` references resolved using current parameter values. Spaces and slashes in the resolved name are replaced with underscores. S3 user metadata (name, description, steps, parameters) is attached for zero-download preview.
+The submitter dialog includes a "Share" button alongside the existing "Export bundle" and "Submit" buttons. Clicking "Share" packages the current job bundle as an `.ojd` archive and uploads it to the queue's S3 `job-bundles/` folder, making it available to the team via the browser's Queue source. The bundle name defaults to the job name, with `{{Param.X}}` references resolved using current parameter values. Spaces and slashes in the resolved name are replaced with underscores. S3 user metadata (name, description, steps, parameters) is attached for zero-download preview.
+
+If a bundle with the same name already exists on the queue, the user is prompted with a confirmation dialog ("Bundle 'name' already exists on the queue. Overwrite?") before proceeding.
 
 Share is enabled when the API is available and a farm and queue are configured — it does not require valid queue parameters (unlike Submit), since sharing only needs S3 access, not a runnable job configuration.
-
-Note: uploading a bundle with the same name as an existing one silently overwrites it in S3.
 
 ### Lazy Loading
 
@@ -262,13 +267,13 @@ Bundled assets (scripts, data files) with relative paths resolve correctly again
 |---|---|
 | `config/config_file.py` | Add `settings.job_bundle_default_directory` to `SETTINGS` |
 | `cli/_groups/bundle_group.py` | Add `deadline bundle list`, `deadline bundle upload`, `deadline bundle download`, and `deadline bundle cache` (clean/update) commands |
-| `ui/dialogs/job_bundle_browser_dialog.py` | **New file.** The browser dialog with filter, Local/S3/History sources. |
+| `ui/dialogs/job_bundle_browser_dialog.py` | **New file.** The browser dialog with filter, Queue/Local/History sources, hidden folder toggle, parameter table preview. Constructor takes keyword-only args: `queue_source`, `queue_error`, `local_source`, `history_source`. |
 | `ui/dialogs/deadline_config_dialog.py` | Add "Job bundle directory" picker to the settings dialog |
-| `ui/dialogs/submit_job_to_deadline_dialog.py` | Add "Share" button to upload the current bundle to S3 |
+| `ui/dialogs/submit_job_to_deadline_dialog.py` | Add "Share" button to upload the current bundle to queue (with overwrite confirmation) |
 | `ui/widgets/job_bundle_settings_tab.py` | `on_load_bundle` opens the new browser dialog instead of `QFileDialog` |
 | `ui/job_bundle_submitter.py` | `show_job_bundle_submitter` uses the new browser dialog when `browse=True`; handles archive extraction and S3 resolution |
 | `job_bundle/loader.py` | Add `is_job_bundle_dir(path) -> bool` helper for quick detection |
-| `job_bundle/repository.py` | **New file.** `BundleRepository` protocol, `LocalBundleRepository`, `S3BundleRepository`, archive helpers, cache management |
+| `job_bundle/repository.py` | **New file.** `BundleRepository` protocol, `LocalBundleRepository`, `S3BundleRepository` (with `from_config()` factory), archive helpers, cache management, metadata constants |
 
 ### CLI Commands
 
@@ -278,7 +283,7 @@ Lists job bundles in a local directory or the queue's S3 `job-bundles/` folder.
 
 - With no arguments, lists bundles in the configured default local directory (`settings.job_bundle_default_directory`, or home if not set). No AWS config needed.
 - With `path`, lists bundles in that local directory.
-- With `--s3`, lists bundles from the queue's S3 job-bundles folder (requires farm and queue).
+- With `--queue`, lists bundles shared on the queue (requires farm and queue).
 - Default output is one bundle name per line, suitable for piping.
 - `--output json`: JSON array with name, format (archive/folder), and path.
 
@@ -290,12 +295,12 @@ maya-arnold
 $ deadline bundle list ./my-bundles
 simple-job
 
-$ deadline bundle list --s3
+$ deadline bundle list --queue
 blender-render
 maya-arnold
 monte_carlo_simulation
 
-$ deadline bundle list --s3 --output json
+$ deadline bundle list --queue --output json
 [{"name": "blender-render", "path": "s3://bucket/prefix/job-bundles/blender-render.ojd", "format": "archive"}, ...]
 
 $ deadline bundle list | head -1 | xargs deadline bundle gui-submit --browse
@@ -355,10 +360,12 @@ blender-render: up-to-date
 
 #### `deadline bundle upload <job_bundle_dir>`
 
-Uploads a local job bundle to the queue's S3 `job-bundles/` folder as an `.ojd` archive.
+Uploads a local job bundle to share on the queue as an `.ojd` archive.
 
-- `--name`: Override the bundle name in S3 (defaults to the directory name).
+- `--name`: Override the bundle name (defaults to the directory name).
 - `--profile`, `--farm-id`, `--queue-id`: Standard config overrides.
+- If a bundle with the same name already exists, prompts for confirmation before overwriting.
+- Symlinks within the bundle directory are skipped (not followed) to prevent unintended file disclosure.
 
 ```
 $ deadline bundle upload ./my-render-job
@@ -366,15 +373,20 @@ Uploaded bundle to s3://my-farm-bucket/DeadlineCloud/job-bundles/my-render-job.o
 
 $ deadline bundle upload ./my-render-job --name custom-name
 Uploaded bundle to s3://my-farm-bucket/DeadlineCloud/job-bundles/custom-name.ojd
+
+$ deadline bundle upload ./my-render-job
+Bundle 'my-render-job' already exists on the queue. Overwrite? [y/N]: y
+Uploaded bundle to s3://my-farm-bucket/DeadlineCloud/job-bundles/my-render-job.ojd
 ```
 
 #### `deadline bundle download <bundle_name>`
 
-Downloads a job bundle from the queue's S3 `job-bundles/` folder.
+Downloads a shared job bundle from the queue.
 
 - Finds the `.ojd` archive matching the given name.
 - Uses the ETag cache (same as the browser dialog) — repeated downloads are instant if the archive hasn't changed.
-- `-o, --output-dir`: Local directory to extract/download to (defaults to `.`).
+- Copies the resolved bundle to the output directory (cache is used internally but the user gets a clean copy at their requested location).
+- `-o, --output-dir`: Local directory to download to (defaults to `.`).
 - `--profile`, `--farm-id`, `--queue-id`: Standard config overrides.
 
 ```
@@ -389,7 +401,7 @@ Downloaded bundle to: /tmp/bundles/blender-render
 
 Errors are displayed inline rather than as popup dialogs:
 
-- **S3 unavailable** (no farm/queue, no JA settings, auth failure): The S3 radio button shows `⚠ S3` and is disabled. Hovering shows the reason in a tooltip. The label distinguishes "not configured" (expected) from errors (⚠ icon).
+- **Queue unavailable** (no farm/queue, no JA settings, auth failure): The Queue radio button is disabled and a styled inline warning label appears below the source selector showing the reason (e.g. "⚠ **Queue browsing unavailable:** AccessDeniedException...").
 - **Listing failure** (network error, permissions): The preview panel shows "⚠ Error" in red with the error message.
 - **Expand failure** (subfolder listing fails): A disabled `⚠ Error: {message}` entry appears in the tree under that folder.
 - **Preview failure** (malformed template, missing fields): The preview panel shows "⚠ Error" with "Could not read bundle template" and the tree entry icon changes from 📦 to ⚠.
@@ -399,11 +411,15 @@ Errors are displayed inline rather than as popup dialogs:
 
 Archives are validated before extraction to prevent path traversal attacks:
 
-- All entry paths are checked for absolute paths and `../` traversal before any extraction occurs. The entire archive is rejected if any entry is suspicious.
+- All entry paths are checked for absolute paths and `../` traversal using `os.path.commonpath()` with `os.path.realpath()` — this handles mixed path separators on Windows. The entire archive is rejected if any entry would extract outside the target directory.
+
+Symlink protection during upload:
+
+- `os.walk(followlinks=False)` is used when archiving bundles. Symlinked files and directories are skipped to prevent unintended inclusion of files outside the bundle directory.
 
 ### S3 Considerations
 
-- **Authentication**: S3 browsing and CLI commands use the same boto3 session/profile as the rest of deadline-cloud. No separate auth flow.
+- **Authentication**: S3 browsing and CLI commands use `api.get_boto3_session()` which respects the configured AWS profile in `~/.deadline/config`. The `S3BundleRepository.from_config()` factory method encapsulates session creation, queue lookup, and settings extraction in one place. No separate auth flow.
 - **Permissions**: Requires `s3:ListBucket` and `s3:GetObject` on the queue's attachment bucket for browsing/download. Upload additionally requires `s3:PutObject`. If access is denied, show an error rather than crashing.
 - **Performance**: Listing is a single paginated `list_objects_v2` call with delimiter. Archive preview with S3 metadata is 1 `head_object` (no download). Cached archive selection is 1 `head_object`.
 - **S3 object metadata**: `deadline bundle upload` attaches bundle name, description, steps, and parameters as S3 user metadata. This enables zero-download preview via `head_object`. Archives uploaded by other means fall back to downloading the archive for preview.

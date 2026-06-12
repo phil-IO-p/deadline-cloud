@@ -619,12 +619,7 @@ def bundle_list(path, use_queue, no_archives, output, **args):
 
     if use_queue:
         config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
-        s3_settings, boto3_session = _get_queue_s3_settings(config)
-        repo: BundleRepository = S3BundleRepository(
-            bucket_name=s3_settings.s3BucketName,
-            root_prefix=s3_settings.rootPrefix,
-            session=boto3_session,
-        )
+        repo: BundleRepository = S3BundleRepository.from_config(config)
     else:
         if path:
             local_root = os.path.abspath(path)
@@ -726,13 +721,7 @@ def bundle_cache_update(bundle_name, **args):
     """Re-download any stale cached bundles from the queue by checking ETags."""
 
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
-    s3_settings, boto3_session = _get_queue_s3_settings(config)
-
-    repo = S3BundleRepository(
-        bucket_name=s3_settings.s3BucketName,
-        root_prefix=s3_settings.rootPrefix,
-        session=boto3_session,
-    )
+    repo = S3BundleRepository.from_config(config)
 
     # List remote bundles to match against cache
     entries = repo.list_entries(repo.root_path())
@@ -910,13 +899,7 @@ def bundle_download(bundle_name, output_dir, **args):
     """
 
     config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
-    s3_settings, boto3_session = _get_queue_s3_settings(config)
-
-    repo = S3BundleRepository(
-        bucket_name=s3_settings.s3BucketName,
-        root_prefix=s3_settings.rootPrefix,
-        session=boto3_session,
-    )
+    repo = S3BundleRepository.from_config(config)
 
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -931,7 +914,7 @@ def bundle_download(bundle_name, output_dir, **args):
 
     if not match:
         available = [e.name for e in entries if e.is_bundle]
-        msg = f"Bundle '{bundle_name}' not found in s3://{s3_settings.s3BucketName}/{repo._prefix}"
+        msg = f"Bundle '{bundle_name}' not found in {repo.root_path()}"
         if available:
             msg += f"\nAvailable bundles: {', '.join(available)}"
         raise DeadlineOperationError(msg)

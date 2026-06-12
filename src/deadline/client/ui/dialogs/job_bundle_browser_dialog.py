@@ -64,12 +64,11 @@ class JobBundleBrowserDialog(QDialog):
 
     def __init__(
         self,
-        local_root: str = "",
-        s3_bucket_name: str = "",
-        s3_root_prefix: str = "",
-        s3_error: str = "",
-        job_history_dir: str = "",
-        session=None,
+        *,
+        queue_source: Optional[S3BundleRepository] = None,
+        queue_error: str = "",
+        local_source: str = "",
+        history_source: str = "",
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent=parent)
@@ -77,19 +76,15 @@ class JobBundleBrowserDialog(QDialog):
         self.setMinimumSize(750, 550)
         self.resize(850, 620)
 
-        self._local_repo = LocalBundleRepository(root=local_root, include_archives=False)
-        self._s3_repo: Optional[S3BundleRepository] = None
-        self._s3_error = s3_error
-        self._s3_available = bool(s3_bucket_name)
-        if s3_bucket_name:
-            self._s3_repo = S3BundleRepository(
-                bucket_name=s3_bucket_name, root_prefix=s3_root_prefix, session=session
-            )
+        self._s3_repo: Optional[S3BundleRepository] = queue_source
+        self._s3_error = queue_error
+        self._s3_available = self._s3_repo is not None
 
-        self._history_dir = job_history_dir
+        self._local_repo = LocalBundleRepository(root=local_source, include_archives=False)
+
         self._history_repo: Optional[LocalBundleRepository] = None
-        if job_history_dir and os.path.isdir(job_history_dir):
-            self._history_repo = LocalBundleRepository(root=job_history_dir, include_archives=False)
+        if history_source and os.path.isdir(history_source):
+            self._history_repo = LocalBundleRepository(root=history_source, include_archives=False)
 
         self._current_repo: BundleRepository = self._local_repo
         self._selected_path: Optional[str] = None
