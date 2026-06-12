@@ -246,34 +246,9 @@ def show_job_bundle_submitter(
         if browser.exec_() != JobBundleBrowserDialog.Accepted or not browser.selected_path:
             return None
 
-        if browser.selected_is_s3 and browser.s3_repo:
-            if browser.selected_is_archive:
-                # Archive bundles are cached locally with ETag validation
-                input_job_bundle_dir = browser.s3_repo.resolve_bundle(browser.selected_path, "")
-            else:
-                # Folder bundles are downloaded to a temp directory
-                import tempfile
-                import atexit
-                import shutil
-
-                temp_dir = tempfile.mkdtemp(prefix="deadline-bundle-")
-                atexit.register(shutil.rmtree, temp_dir, True)
-                input_job_bundle_dir = browser.s3_repo.resolve_bundle(
-                    browser.selected_path, temp_dir
-                )
-        elif browser.selected_is_archive:
-            # Local archive — extract to temp dir
-            import tempfile
-            import atexit
-            import shutil
-
-            temp_dir = tempfile.mkdtemp(prefix="deadline-bundle-")
-            atexit.register(shutil.rmtree, temp_dir, True)
-            input_job_bundle_dir = browser._local_repo.extract_bundle(
-                browser.selected_path, temp_dir
-            )
-        else:
-            input_job_bundle_dir = browser.selected_path
+        input_job_bundle_dir = browser.resolve_selection()
+        if not input_job_bundle_dir:
+            return None
 
     def on_create_job_bundle_callback(
         widget: SubmitJobToDeadlineDialog,

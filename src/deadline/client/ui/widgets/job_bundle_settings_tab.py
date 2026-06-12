@@ -6,10 +6,7 @@ UI widgets for the scene settings tab.
 
 from __future__ import annotations
 
-import atexit
 import os
-import shutil
-import tempfile
 from logging import getLogger
 from typing import Any, Optional
 
@@ -113,23 +110,9 @@ class JobBundleSettingsWidget(QWidget):
         if browser.exec_() != JobBundleBrowserDialog.Accepted or not browser.selected_path:
             return
 
-        if browser.selected_is_s3 and browser.s3_repo:
-            if browser.selected_is_archive:
-                input_job_bundle_dir = browser.s3_repo.resolve_bundle(browser.selected_path, "")
-            else:
-                temp_dir = tempfile.mkdtemp(prefix="deadline-bundle-")
-                atexit.register(shutil.rmtree, temp_dir, True)
-                input_job_bundle_dir = browser.s3_repo.resolve_bundle(
-                    browser.selected_path, temp_dir
-                )
-        elif browser.selected_is_archive:
-            temp_dir = tempfile.mkdtemp(prefix="deadline-bundle-")
-            atexit.register(shutil.rmtree, temp_dir, True)
-            input_job_bundle_dir = browser._local_repo.extract_bundle(
-                browser.selected_path, temp_dir
-            )
-        else:
-            input_job_bundle_dir = browser.selected_path
+        input_job_bundle_dir = browser.resolve_selection()
+        if not input_job_bundle_dir:
+            return
 
         # Update job bundle directory path
         self.input_job_bundle_dir = input_job_bundle_dir

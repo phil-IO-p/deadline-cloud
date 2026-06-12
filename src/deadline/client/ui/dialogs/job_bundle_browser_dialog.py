@@ -7,7 +7,10 @@ Shows a navigable tree of directories/bundles with a preview panel.
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
+import tempfile
 from logging import getLogger
 from typing import Optional
 
@@ -111,6 +114,29 @@ class JobBundleBrowserDialog(QDialog):
     @property
     def s3_repo(self) -> Optional[S3BundleRepository]:
         return self._s3_repo
+
+    def resolve_selection(self) -> Optional[str]:
+        """Resolve the selected bundle to a local directory path.
+
+        Handles S3 download/cache, archive extraction, and direct directory paths.
+        Returns None if no selection.
+        """
+        if not self._selected_path:
+            return None
+
+        if self._selected_is_s3 and self._s3_repo:
+            if self._selected_is_archive:
+                return self._s3_repo.resolve_bundle(self._selected_path, "")
+            else:
+                temp_dir = tempfile.mkdtemp(prefix="deadline-bundle-")
+                atexit.register(shutil.rmtree, temp_dir, True)
+                return self._s3_repo.resolve_bundle(self._selected_path, temp_dir)
+        elif self._selected_is_archive:
+            temp_dir = tempfile.mkdtemp(prefix="deadline-bundle-")
+            atexit.register(shutil.rmtree, temp_dir, True)
+            return self._local_repo.extract_bundle(self._selected_path, temp_dir)
+        else:
+            return self._selected_path
 
     # ── UI Construction ──────────────────────────────────────────
 
