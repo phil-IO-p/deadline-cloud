@@ -126,16 +126,8 @@ class JobBundleBrowserDialog(QDialog):
         source_row = QHBoxLayout()
         source_label = QLabel(tr("Source:"))
         source_row.addWidget(source_label)
-        if self._s3_repo:
-            queue_label = tr("Queue")
-        elif self._s3_error:
-            queue_label = "\u26a0 " + tr("Queue")
-        else:
-            queue_label = tr("Queue") + " (not configured)"
-        self._radio_s3 = QRadioButton(queue_label)
+        self._radio_s3 = QRadioButton(tr("Queue"))
         self._radio_s3.setEnabled(self._s3_available)
-        if not self._s3_available and self._s3_error:
-            self._radio_s3.setToolTip(f"Queue unavailable: {self._s3_error}")
         self._radio_s3.toggled.connect(self._on_source_changed)
         source_row.addWidget(self._radio_s3)
         self._radio_local = QRadioButton(tr("Local"))
@@ -147,6 +139,24 @@ class JobBundleBrowserDialog(QDialog):
         source_row.addWidget(self._radio_history)
         source_row.addStretch()
         layout.addLayout(source_row)
+
+        # Inline warning when queue source is unavailable
+        self._queue_warning = QLabel()
+        self._queue_warning.setWordWrap(True)
+        self._queue_warning.setStyleSheet(
+            "QLabel { color: #b35900; background-color: #fff3e0;"
+            " border: 1px solid #ffcc80; border-radius: 4px;"
+            " padding: 4px 8px; }"
+        )
+        if not self._s3_available and self._s3_error:
+            self._queue_warning.setText(
+                f"\u26a0 <b>Queue browsing unavailable:</b> {self._s3_error}"
+            )
+            self._queue_warning.setTextFormat(Qt.RichText)
+            self._queue_warning.setVisible(True)
+        else:
+            self._queue_warning.setVisible(False)
+        layout.addWidget(self._queue_warning)
 
         # Show hidden folders checkbox
         self._show_hidden_cb = QCheckBox(tr("Show hidden folders"), parent=self)
