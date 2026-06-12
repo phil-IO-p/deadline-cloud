@@ -6,6 +6,7 @@ import json
 import zipfile
 
 import yaml
+from botocore.exceptions import ClientError
 from click.testing import CliRunner
 from unittest.mock import MagicMock, patch
 
@@ -93,6 +94,7 @@ class TestBundleUpload:
 
         mock_session = MagicMock()
         mock_s3 = MagicMock()
+        mock_s3.head_object.side_effect = ClientError({"Error": {"Code": "404"}}, "HeadObject")
         mock_session.client.return_value = mock_s3
         mock_s3_settings.return_value = (
             MagicMock(s3BucketName="test-bucket", rootPrefix="DeadlineCloud"),
@@ -202,6 +204,7 @@ class TestMetadataTruncation:
 
         mock_session = MagicMock()
         mock_s3 = MagicMock()
+        mock_s3.head_object.side_effect = ClientError({"Error": {"Code": "404"}}, "HeadObject")
         mock_session.client.return_value = mock_s3
         mock_s3_settings.return_value = (
             MagicMock(s3BucketName="test-bucket", rootPrefix="DC"),
@@ -251,6 +254,7 @@ class TestMetadataTruncation:
 
         mock_session = MagicMock()
         mock_s3 = MagicMock()
+        mock_s3.head_object.side_effect = ClientError({"Error": {"Code": "404"}}, "HeadObject")
         mock_session.client.return_value = mock_s3
         mock_s3_settings.return_value = (
             MagicMock(s3BucketName="test-bucket", rootPrefix="DC"),
@@ -269,3 +273,53 @@ class TestMetadataTruncation:
         metadata = call_args[1]["ExtraArgs"]["Metadata"]
         assert metadata["ojd-name"] == "Short Name"
         assert not metadata["ojd-name"].endswith("...")
+
+
+class TestBundleUploadOverwrite:
+    @patch(f"{BUNDLE_GROUP}._apply_cli_options_to_config")
+    @patch(f"{BUNDLE_GROUP}._get_queue_s3_settings")
+    def test_upload_prompts_when_bundle_exists_and_user_confirms(
+        self, mock_s3_settings, mock_config, tmp_path
+    ):
+        bundle = tmp_path / "my-bundle"
+        bundle.mkdir()
+        (bundle / "template.yaml").write_text("name: Test\nsteps:\n- name: S1\n")
+
+        mock_session = MagicMock()
+        mock_s3 = MagicMock()
+        mock_s3.head_object.return_value = {}  # exists
+        mock_session.client.return_value = mock_s3
+        mock_s3_settings.return_value = (
+            MagicMock(s3BucketName="test-bucket", rootPrefix="DC"),
+            mock_session,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["bundle", "upload", str(bundle)], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert "already exists" in result.output
+        mock_s3.upload_fileobj.assert_called_once()
+
+    @patch(f"{BUNDLE_GROUP}._apply_cli_options_to_config")
+    @patch(f"{BUNDLE_GROUP}._get_queue_s3_settings")
+    def test_upload_aborts_when_bundle_exists_and_user_declines(
+        self, mock_s3_settings, mock_config, tmp_path
+    ):
+        bundle = tmp_path / "my-bundle"
+        bundle.mkdir()
+        (bundle / "template.yaml").write_text("name: Test\nsteps:\n- name: S1\n")
+
+        mock_session = MagicMock()
+        mock_s3 = MagicMock()
+        mock_s3.head_object.return_value = {}  # exists
+        mock_session.client.return_value = mock_s3
+        mock_s3_settings.return_value = (
+            MagicMock(s3BucketName="test-bucket", rootPrefix="DC"),
+            mock_session,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["bundle", "upload", str(bundle)], input="n\n")
+        assert result.exit_code == 0, result.output
+        assert "canceled" in result.output.lower()
+        mock_s3.upload_fileobj.assert_not_called()

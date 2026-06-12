@@ -763,6 +763,23 @@ class SubmitJobToDeadlineDialog(QDialog):
             prefix = f"{s3_settings.rootPrefix.rstrip('/')}/{S3_JOB_BUNDLES_PREFIX}"
             s3_key = f"{prefix}/{bundle_name}.ojd"
 
+            s3 = boto3_session.client("s3")
+
+            # Check if bundle already exists
+            try:
+                s3.head_object(Bucket=s3_settings.s3BucketName, Key=s3_key)
+                reply = QMessageBox.question(
+                    self,
+                    "Overwrite?",
+                    f"Bundle '{bundle_name}' already exists on the queue. Overwrite?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return
+            except Exception:
+                pass  # 404 means it doesn't exist, proceed
+
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for root, _dirs, files in os.walk(self.job_history_bundle_dir):
@@ -772,7 +789,6 @@ class SubmitJobToDeadlineDialog(QDialog):
                         zf.write(local_path, arcname)
 
             buf.seek(0)
-            s3 = boto3_session.client("s3")
             s3.upload_fileobj(
                 buf,
                 s3_settings.s3BucketName,

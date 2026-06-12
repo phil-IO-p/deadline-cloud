@@ -852,12 +852,22 @@ def bundle_upload(job_bundle_dir, name, **args):
 
     bundle_name = name or os.path.basename(job_bundle_dir)
     prefix = f"{s3_settings.rootPrefix.rstrip('/')}/{S3_JOB_BUNDLES_PREFIX}"
+    s3_key = f"{prefix}/{bundle_name}.ojd"
 
     s3 = boto3_session.client("s3")
 
+    # Check if bundle already exists
+    try:
+        s3.head_object(Bucket=s3_settings.s3BucketName, Key=s3_key)
+        if not click.confirm(f"Bundle '{bundle_name}' already exists on the queue. Overwrite?"):
+            click.echo("Upload canceled.")
+            return
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "404":
+            raise
+
     # Archive and upload
     buf = io.BytesIO()
-    ext = ".ojd"
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, _dirs, files in os.walk(job_bundle_dir):
             for fname in files:
@@ -865,7 +875,6 @@ def bundle_upload(job_bundle_dir, name, **args):
                 arcname = os.path.relpath(local_path, job_bundle_dir)
                 zf.write(local_path, arcname)
 
-    s3_key = f"{prefix}/{bundle_name}{ext}"
     buf.seek(0)
     s3.upload_fileobj(
         buf,
