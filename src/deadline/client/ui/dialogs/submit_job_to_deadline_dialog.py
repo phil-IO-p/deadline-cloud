@@ -759,7 +759,7 @@ class SubmitJobToDeadlineDialog(QDialog):
                 resolved_name, METADATA_LIMIT_NAME, METADATA_KEY_NAME
             )
 
-            bundle_name = resolved_name.replace(" ", "_").replace("/", "_")
+            bundle_name = resolved_name.replace("/", "_")
             prefix = f"{s3_settings.rootPrefix.rstrip('/')}/{S3_JOB_BUNDLES_PREFIX}"
             s3_key = f"{prefix}/{bundle_name}.ojd"
 

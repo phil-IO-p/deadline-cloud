@@ -42,6 +42,7 @@ from ...job_bundle.repository import (
     _get_bundle_cache_dir,
     _parse_template,
     _read_cache_meta,
+    sanitize_bundle_name,
 )
 from ....job_attachments.exceptions import (
     AssetSyncError,
@@ -840,8 +841,16 @@ def bundle_upload(job_bundle_dir, name, **args):
             break
 
     bundle_name = name or os.path.basename(job_bundle_dir)
+    if not bundle_name or not bundle_name.strip("/ \\"):
+        raise DeadlineOperationError(
+            "Bundle name is empty or invalid. Use --name to specify a valid name."
+        )
     prefix = f"{s3_settings.rootPrefix.rstrip('/')}/{S3_JOB_BUNDLES_PREFIX}"
     s3_key = f"{prefix}/{bundle_name}.ojd"
+    if len(s3_key) > 1024:
+        raise DeadlineOperationError(
+            f"Bundle name is too long. S3 key would be {len(s3_key)} characters (max 1024)."
+        )
 
     s3 = boto3_session.client("s3")
 
@@ -921,7 +930,7 @@ def bundle_download(bundle_name, output_dir, **args):
 
     local_path = repo.download_full_bundle(match.path, output_dir)
     # download_full_bundle resolves to cache; copy to user's output_dir
-    dest_path = os.path.join(output_dir, bundle_name)
+    dest_path = os.path.join(output_dir, sanitize_bundle_name(bundle_name))
     if os.path.exists(dest_path):
         shutil.rmtree(dest_path)
     shutil.copytree(local_path, dest_path)

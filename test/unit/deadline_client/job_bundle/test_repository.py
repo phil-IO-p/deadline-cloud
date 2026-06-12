@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import zipfile
 
 import pytest
@@ -20,6 +21,7 @@ from deadline.client.job_bundle.repository import (
     _read_template_from_archive_path,
     _safe_zip_extract,
     _strip_archive_ext,
+    sanitize_bundle_name,
 )
 
 
@@ -503,3 +505,35 @@ class TestSafeZipExtract:
 
         assert (dest / "template.yaml").exists()
         assert (dest / "subdir" / "file.txt").exists()
+
+
+class TestSanitizeBundleName:
+    def test_slashes_replaced(self):
+        assert sanitize_bundle_name("path/to/bundle") == "path_to_bundle"
+
+    def test_backslashes_replaced_on_windows(self):
+        if sys.platform == "win32":
+            assert sanitize_bundle_name("path\\to\\bundle") == "path_to_bundle"
+
+    def test_backslashes_preserved_on_posix(self):
+        if sys.platform != "win32":
+            assert sanitize_bundle_name("path\\to\\bundle") == "path\\to\\bundle"
+
+    def test_windows_illegal_chars_replaced_on_windows(self):
+        if sys.platform == "win32":
+            assert sanitize_bundle_name("file:name*with?bad<chars>") == "file_name_with_bad_chars_"
+
+    def test_colons_preserved_on_posix(self):
+        if sys.platform != "win32":
+            assert sanitize_bundle_name("my:bundle") == "my:bundle"
+
+    def test_empty_after_sanitization_raises(self):
+        with pytest.raises(ValueError, match="empty after sanitization"):
+            sanitize_bundle_name("///")
+
+    def test_long_name_preserved(self):
+        long_name = "a" * 1000
+        assert sanitize_bundle_name(long_name) == long_name
+
+    def test_normal_name_unchanged(self):
+        assert sanitize_bundle_name("blender-render_v2.1") == "blender-render_v2.1"

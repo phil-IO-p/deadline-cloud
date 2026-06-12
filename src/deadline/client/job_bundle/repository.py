@@ -11,7 +11,9 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
+import sys
 import zipfile
 from dataclasses import dataclass, field
 from logging import getLogger
@@ -44,6 +46,24 @@ METADATA_LIMIT_NAME = 256
 METADATA_LIMIT_DESC = 480
 METADATA_LIMIT_STEPS = 480
 METADATA_LIMIT_PARAMS = 700
+
+# POSIX only forbids / and null; Windows also forbids \ : * ? " < > |
+# Control characters (0x00-0x1F, 0x7F) are problematic on all platforms
+_WINDOWS_UNSAFE_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f]+')
+_POSIX_UNSAFE_CHARS = re.compile(r"[/\x00-\x1f\x7f]+")
+
+
+def sanitize_bundle_name(name: str) -> str:
+    """Sanitize a bundle name for use as a local directory name.
+
+    Only replaces characters illegal on the current OS, preserving the
+    original name as closely as possible.
+    """
+    pattern = _WINDOWS_UNSAFE_CHARS if sys.platform == "win32" else _POSIX_UNSAFE_CHARS
+    name = pattern.sub("_", name).strip("_")
+    if not name:
+        raise ValueError("Bundle name is empty after sanitization")
+    return name
 
 
 def _is_archive(name: str) -> bool:
