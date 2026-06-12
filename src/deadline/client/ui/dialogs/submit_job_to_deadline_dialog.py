@@ -728,7 +728,7 @@ class SubmitJobToDeadlineDialog(QDialog):
 
             bundle_name = resolved_name.replace(" ", "_").replace("/", "_")
             prefix = f"{s3_settings.rootPrefix.rstrip('/')}/{S3_JOB_BUNDLES_PREFIX}"
-            s3_key = f"{prefix}/{bundle_name}.zip"
+            s3_key = f"{prefix}/{bundle_name}.ojd"
 
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
