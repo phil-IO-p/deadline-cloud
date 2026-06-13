@@ -21,11 +21,9 @@ from typing import Optional, Protocol
 
 import yaml
 
-from ..api import get_boto3_session
 from ..config import config_file
 from ..config.config_file import get_cache_directory
 from ..exceptions import DeadlineOperationError
-from ...job_attachments._aws.deadline import get_queue
 
 logger = getLogger(__name__)
 
@@ -403,6 +401,9 @@ class S3BundleRepository:
         Handles session creation, queue lookup, and attachment settings extraction.
         Raises DeadlineOperationError if farm/queue is not configured or has no attachments.
         """
+        from ..api import get_boto3_session
+        from ...job_attachments._aws.deadline import get_queue
+
         farm_id = config_file.get_setting("defaults.farm_id", config=config)
         queue_id = config_file.get_setting("defaults.queue_id", config=config)
         if not farm_id or not queue_id:

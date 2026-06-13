@@ -208,13 +208,42 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 - Path display showing the current browse location.
 - Cancel and Select buttons. Select is enabled only when a valid bundle is highlighted.
 
-### Share Button
+### Export Bundle
 
-The submitter dialog includes a "Share" button alongside the existing "Export bundle" and "Submit" buttons. Clicking "Share" packages the current job bundle as an `.ojd` archive and uploads it to the queue's S3 `job-bundles/` folder, making it available to the team via the browser's Queue source. The bundle name defaults to the job name, with `{{Param.X}}` references resolved using current parameter values. Spaces and slashes in the resolved name are replaced with underscores. S3 user metadata (name, description, steps, parameters) is attached for zero-download preview.
+The submitter dialog's "Export bundle" button replaces the previous separate "Export" and "Share" buttons with a unified flow. Clicking it opens an export dialog:
 
-If a bundle with the same name already exists on the queue, the user is prompted with a confirmation dialog ("Bundle 'name' already exists on the queue. Overwrite?") before proceeding.
+```
+┌─ Export Bundle ─────────────────────────────┐
+│                                             │
+│  Name: [blender-render_________]            │
+│                                             │
+│  Save to:                                   │
+│  (•) Queue    ( ) Local                     │
+│                                             │
+│  ⚠ Queue unavailable: AccessDenied...       │
+│  (inline warning, shown only when Queue     │
+│   is disabled)                              │
+│                                             │
+│  Location: [s3://bucket/DC/job-bundles/]    │
+│  (read-only for Queue, editable for Local)  │
+│                                             │
+│                     [Cancel] [Export]        │
+└─────────────────────────────────────────────┘
+```
 
-Share is enabled when the API is available and a farm and queue are configured — it does not require valid queue parameters (unlike Submit), since sharing only needs S3 access, not a runnable job configuration.
+**Name** — defaults to the job name with `{{Param.X}}` references resolved using current parameter values. Editable. Used as the `.ojd` filename for Queue or the directory name for Local.
+
+**Save to** — Queue or Local:
+- **Queue**: archives the bundle as `.ojd` and uploads to the queue's S3 `job-bundles/` folder. S3 user metadata (name, description, steps, parameters) is attached for zero-download preview. If a bundle with the same name already exists, the user is prompted to confirm overwrite. When Queue is unavailable (no permissions, no farm/queue configured, no job attachment settings), the radio button is disabled and an inline warning label explains why.
+- **Local**: saves the bundle as a directory to the specified location. Defaults to `settings.job_bundle_default_directory` — the same path the browser's Local source browses. The exported bundle immediately appears when browsing Local.
+
+**Location** — always visible, updates based on the selected source:
+- **Queue selected**: shows the S3 path (e.g. `s3://bucket/DeadlineCloud/job-bundles/`), read-only.
+- **Local selected**: shows the local directory path, editable with a folder picker button for override.
+
+Queue export is enabled when the API is available and a farm and queue are configured. Local export is always available.
+
+Note: the job history directory (`settings.job_history_dir`) is still used internally during Submit to record what was submitted, but Export now targets user-visible locations (Local browse path or Queue) rather than the history directory.
 
 ### Lazy Loading
 
@@ -269,7 +298,8 @@ Bundled assets (scripts, data files) with relative paths resolve correctly again
 | `cli/_groups/bundle_group.py` | Add `deadline bundle list`, `deadline bundle upload`, `deadline bundle download`, and `deadline bundle cache` (clean/update) commands |
 | `ui/dialogs/job_bundle_browser_dialog.py` | **New file.** The browser dialog with filter, Queue/Local/History sources, hidden folder toggle, parameter table preview. Constructor takes keyword-only args: `queue_source`, `queue_error`, `local_source`, `history_source`. |
 | `ui/dialogs/deadline_config_dialog.py` | Add "Job bundle directory" picker to the settings dialog |
-| `ui/dialogs/submit_job_to_deadline_dialog.py` | Add "Share" button to upload the current bundle to queue (with overwrite confirmation) |
+| `ui/dialogs/submit_job_to_deadline_dialog.py` | Replace "Export" and "Share" buttons with unified "Export bundle" button that opens the export dialog |
+| `ui/dialogs/export_bundle_dialog.py` | **New file.** Export dialog with Queue/Local destination, name override, and location display |
 | `ui/widgets/job_bundle_settings_tab.py` | `on_load_bundle` opens the new browser dialog instead of `QFileDialog` |
 | `ui/job_bundle_submitter.py` | `show_job_bundle_submitter` uses the new browser dialog when `browse=True`; handles archive extraction and S3 resolution |
 | `job_bundle/loader.py` | Add `is_job_bundle_dir(path) -> bool` helper for quick detection |

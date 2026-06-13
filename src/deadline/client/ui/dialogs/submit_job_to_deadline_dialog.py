@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
-import sys
-import json
+import shutil
 import zipfile
 from typing import Any, Dict, Optional, Protocol
 import yaml
@@ -45,7 +45,6 @@ from ...job_bundle import create_job_history_bundle_dir
 from ...job_bundle.parameters import JobParameter
 from ...job_bundle.submission import AssetReferences
 from ...job_bundle.repository import (
-    S3_JOB_BUNDLES_PREFIX,
     LocalBundleRepository,
     METADATA_KEY_DESC,
     METADATA_KEY_NAME,
@@ -55,10 +54,10 @@ from ...job_bundle.repository import (
     METADATA_LIMIT_NAME,
     METADATA_LIMIT_PARAMS,
     METADATA_LIMIT_STEPS,
+    S3BundleRepository,
     _extract_bundle_info,
     _parse_template,
 )
-from ....job_attachments._aws.deadline import get_queue
 from ..widgets.deadline_authentication_status_widget import DeadlineAuthenticationStatusWidget
 from ..widgets.job_attachments_tab import JobAttachmentsWidget
 from ..widgets.shared_job_settings_tab import SharedJobSettingsWidget
@@ -66,6 +65,7 @@ from ..widgets.host_requirements_tab import HostRequirementsWidget
 from . import DeadlineConfigDialog, DeadlineLoginDialog
 from ._types import JobBundlePurpose
 from ._help_dialog import _HelpDialog
+from .export_bundle_dialog import ExportBundleDialog
 
 logger = logging.getLogger(__name__)
 
@@ -293,9 +293,6 @@ class SubmitJobToDeadlineDialog(QDialog):
         self.export_bundle_button = QPushButton(tr("Export bundle"))
         self.export_bundle_button.clicked.connect(self.on_export_bundle)
         self.button_box.addButton(self.export_bundle_button, QDialogButtonBox.AcceptRole)
-        self.share_bundle_button = QPushButton("Share")
-        self.share_bundle_button.clicked.connect(self.on_share_bundle)
-        self.button_box.addButton(self.share_bundle_button, QDialogButtonBox.AcceptRole)
 
         self.lyt.addWidget(self.button_box)
 
@@ -310,7 +307,6 @@ class SubmitJobToDeadlineDialog(QDialog):
         enable = api_available and farm_configured and queue_configured and queue_valid
 
         self.submit_button.setEnabled(enable)
-        self.share_bundle_button.setEnabled(api_available and farm_configured and queue_configured)
 
         if not enable:
             issues = []
@@ -572,37 +568,63 @@ class SubmitJobToDeadlineDialog(QDialog):
             self.job_settings.on_load_bundle()
 
     def on_export_bundle(self):
-        """
-        Exports a Job Bundle, but does not submit the job.
-        """
-        # Retrieve all the settings into the dataclass
+        """Export a job bundle to Queue (S3) or a local directory."""
+        # Gather settings
         settings = self.job_settings_type()
         self.shared_job_settings.update_settings(settings)
         self.job_settings.update_settings(settings)
-
         queue_parameters = self.shared_job_settings.get_parameters()
 
-        asset_references = self.job_attachments.get_asset_references()
+        # Default export name is the bundle directory name on disk
+        resolved_name = (
+            os.path.basename(settings.input_job_bundle_dir)
+            if settings.input_job_bundle_dir
+            else settings.name
+        )
 
-        # Save the bundle
+        # Try to get queue repo for the dialog
+        queue_repo = None
+        queue_error = ""
+        try:
+            queue_repo = S3BundleRepository.from_config()
+        except Exception as e:
+            queue_error = str(e)
+
+        # Get default local directory
+        local_dir = get_setting("settings.job_bundle_default_directory")
+        if local_dir:
+            local_dir = os.path.expanduser(local_dir)
+        else:
+            local_dir = os.path.expanduser("~")
+
+        # Show export dialog
+        dialog = ExportBundleDialog(
+            default_name=resolved_name,
+            queue_repo=queue_repo,
+            queue_error=queue_error,
+            local_dir=local_dir,
+            parent=self,
+        )
+        if dialog.exec_() != ExportBundleDialog.Accepted or not dialog.bundle_name:
+            return
+
+        # Create the bundle locally first
+        asset_references = self.job_attachments.get_asset_references()
         try:
             self.job_history_bundle_dir = create_job_history_bundle_dir(
                 self.submitter_info.submitter_name, settings.name
             )
-
             if self.show_host_requirements_tab:
-                host_requirements = self.host_requirements.get_requirements()
                 parameters_from_callback = self.on_create_job_bundle_callback(
                     self,
                     self.job_history_bundle_dir,
                     settings,
                     queue_parameters,
                     asset_references,
-                    host_requirements,
+                    self.host_requirements.get_requirements(),
                     purpose=JobBundlePurpose.EXPORT,
                 )
             else:
-                # Maintaining backward compatibility for submitters that do not support host_requirements yet
                 parameters_from_callback = self.on_create_job_bundle_callback(
                     self,
                     self.job_history_bundle_dir,
@@ -613,98 +635,50 @@ class SubmitJobToDeadlineDialog(QDialog):
                 )
             if parameters_from_callback is None:
                 parameters_from_callback = {}
-
-            # If the callback returned job parameters, update them in the job bundle as well so that
-            # submission from the job history dir is equivalent.
             job_parameters = parameters_from_callback.get("job_parameters", [])
             if job_parameters:
                 self.save_job_parameters_to_job_bundle(self.job_history_bundle_dir, job_parameters)
-
-            logger.info(f"Saved the submission as a job bundle: {self.job_history_bundle_dir}")
-            if sys.platform == "win32":
-                # Open the directory in the OS's file explorer
-                os.startfile(self.job_history_bundle_dir)
-            QMessageBox.information(
-                self,
-                tr("{submitter} job submission").format(
-                    submitter=self.submitter_info.submitter_name
-                ),
-                tr("Saved the submission as a job bundle:\n{path}").format(
-                    path=self.job_history_bundle_dir
-                ),
-            )
-            # Close the submitter window to signal the submission is done
-            self.close()
-
         except NonValidInputError as nvie:
             QMessageBox.critical(self, tr("Non valid inputs detected"), str(nvie))
-
+            return
         except Exception as exc:
-            logger.exception("Error saving bundle")
-            message = str(exc)
-            QMessageBox.critical(
+            logger.exception("Error creating bundle")
+            QMessageBox.critical(self, "Export failed", f"Failed to create bundle:\n{exc}")
+            return
+
+        bundle_name = dialog.bundle_name
+
+        if dialog.export_to_queue:
+            self._export_to_queue(queue_repo, bundle_name)
+        else:
+            self._export_to_local(dialog.local_directory, bundle_name)
+
+    def _export_to_local(self, dest_dir: str, bundle_name: str):
+        """Copy the bundle to a local directory."""
+        assert self.job_history_bundle_dir is not None
+        dest_path = os.path.join(dest_dir, bundle_name)
+        try:
+            if os.path.exists(dest_path):
+                shutil.rmtree(dest_path)
+            shutil.copytree(self.job_history_bundle_dir, dest_path)
+            QMessageBox.information(
                 self,
-                tr("{submitter} job submission").format(
-                    submitter=self.submitter_info.submitter_name
-                ),
-                message,
-            )  # type: ignore[call-arg]
-
-    def on_share_bundle(self):
-        """Archive the current bundle and share it on the queue."""
-
-        # First export the bundle locally
-        settings = self.job_settings_type()
-        self.shared_job_settings.update_settings(settings)
-        self.job_settings.update_settings(settings)
-        queue_parameters = self.shared_job_settings.get_parameters()
-        asset_references = self.job_attachments.get_asset_references()
-
-        try:
-            self.job_history_bundle_dir = create_job_history_bundle_dir(
-                self.submitter_info.submitter_name, settings.name
+                tr("Export bundle"),
+                f"Bundle exported to:\n{dest_path}",
             )
-            if self.show_host_requirements_tab:
-                self.on_create_job_bundle_callback(
-                    self,
-                    self.job_history_bundle_dir,
-                    settings,
-                    queue_parameters,
-                    asset_references,
-                    self.host_requirements.get_requirements(),
-                    purpose=JobBundlePurpose.EXPORT,
-                )
-            else:
-                self.on_create_job_bundle_callback(
-                    self,
-                    self.job_history_bundle_dir,
-                    settings,
-                    queue_parameters,
-                    asset_references,
-                    purpose=JobBundlePurpose.EXPORT,
-                )
         except Exception as exc:
-            QMessageBox.critical(self, "Share failed", f"Failed to create bundle:\n{exc}")
+            QMessageBox.critical(self, "Export failed", f"Failed to save bundle:\n{exc}")
+
+    def _export_to_queue(self, queue_repo: Optional[S3BundleRepository], bundle_name: str):
+        """Archive and upload the bundle to the queue's S3 job-bundles folder."""
+        if not queue_repo:
+            QMessageBox.critical(self, "Export failed", "Queue is not available.")
             return
 
-        # Get queue S3 settings
-        try:
-            farm_id = get_setting("defaults.farm_id")
-            queue_id = get_setting("defaults.queue_id")
-            boto3_session = api.get_boto3_session()
-            queue_obj = get_queue(farm_id=farm_id, queue_id=queue_id, session=boto3_session)
-            if not queue_obj.jobAttachmentSettings:
-                QMessageBox.warning(
-                    self, "Share failed", "Queue does not have job attachment settings configured."
-                )
-                return
-            s3_settings = queue_obj.jobAttachmentSettings
-        except Exception as exc:
-            QMessageBox.critical(self, "Share failed", f"Failed to get queue settings:\n{exc}")
-            return
+        assert self.job_history_bundle_dir is not None
 
-        # Build S3 metadata from the template
-        bundle_metadata = {}
+        # Build S3 metadata
+        bundle_metadata: dict[str, str] = {}
         for tname in ("template.yaml", "template.json"):
             tpath = os.path.join(self.job_history_bundle_dir, tname)
             if os.path.isfile(tpath):
@@ -713,9 +687,8 @@ class SubmitJobToDeadlineDialog(QDialog):
                 if template:
                     pv = LocalBundleRepository._read_parameter_values(self.job_history_bundle_dir)
                     info = _extract_bundle_info(template, self.job_history_bundle_dir, pv)
-                    # Use settings.name which is already resolved by the UI
                     bundle_metadata[METADATA_KEY_NAME] = _truncate_metadata(
-                        settings.name, METADATA_LIMIT_NAME, METADATA_KEY_NAME
+                        bundle_name, METADATA_LIMIT_NAME, METADATA_KEY_NAME
                     )
                     if info.description:
                         desc = " ".join(info.description.split())
@@ -737,37 +710,12 @@ class SubmitJobToDeadlineDialog(QDialog):
 
         # Archive and upload
         try:
-            # Resolve any {{Param.X}} in the name using current parameter values
-            import re
-
-            param_value_map = {
-                p["name"]: p.get("value", p.get("default", "")) for p in queue_parameters
-            }
-            for p in settings.parameters:
-                param_value_map[p["name"]] = p.get("value", p.get("default", ""))
-
-            resolved_name = re.sub(
-                r"\{\{Param\.(\w+)\}\}",
-                lambda m: str(param_value_map.get(m.group(1), m.group(0))),
-                settings.name,
-            )
-            if not resolved_name.strip():
-                resolved_name = os.path.basename(
-                    settings.input_job_bundle_dir
-                )  # fallback to dir name
-            bundle_metadata[METADATA_KEY_NAME] = _truncate_metadata(
-                resolved_name, METADATA_LIMIT_NAME, METADATA_KEY_NAME
-            )
-
-            bundle_name = resolved_name.replace("/", "_")
-            prefix = f"{s3_settings.rootPrefix.rstrip('/')}/{S3_JOB_BUNDLES_PREFIX}"
-            s3_key = f"{prefix}/{bundle_name}.ojd"
-
-            s3 = boto3_session.client("s3")
+            s3_key = f"{queue_repo._prefix}{bundle_name}.ojd"
+            s3 = queue_repo._s3
 
             # Check if bundle already exists
             try:
-                s3.head_object(Bucket=s3_settings.s3BucketName, Key=s3_key)
+                s3.head_object(Bucket=queue_repo._bucket, Key=s3_key)
                 reply = QMessageBox.question(
                     self,
                     "Overwrite?",
@@ -778,7 +726,7 @@ class SubmitJobToDeadlineDialog(QDialog):
                 if reply != QMessageBox.Yes:
                     return
             except Exception:
-                pass  # 404 means it doesn't exist, proceed
+                pass
 
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -794,18 +742,18 @@ class SubmitJobToDeadlineDialog(QDialog):
             buf.seek(0)
             s3.upload_fileobj(
                 buf,
-                s3_settings.s3BucketName,
+                queue_repo._bucket,
                 s3_key,
                 ExtraArgs={"Metadata": bundle_metadata} if bundle_metadata else None,
             )
 
             QMessageBox.information(
                 self,
-                "Shared",
-                f"Bundle shared to queue:\ns3://{s3_settings.s3BucketName}/{s3_key}",
+                tr("Export bundle"),
+                f"Bundle exported to queue:\ns3://{queue_repo._bucket}/{s3_key}",
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Share failed", f"Failed to upload bundle:\n{exc}")
+            QMessageBox.critical(self, "Export failed", f"Failed to upload bundle:\n{exc}")
 
     def save_job_parameters_to_job_bundle(
         self, job_bundle_dir: str, job_parameters: list[JobParameter]

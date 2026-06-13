@@ -57,6 +57,7 @@ def _patch_browser(selected_path=None, accepted=True):
     mock_instance.selected_is_s3 = False
     mock_instance.selected_is_archive = False
     mock_instance.s3_repo = None
+    mock_instance.resolve_selection.return_value = selected_path
 
     mock_cls = MagicMock(return_value=mock_instance)
     mock_cls.Accepted = 1
