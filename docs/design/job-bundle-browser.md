@@ -302,7 +302,7 @@ Bundled assets (scripts, data files) with relative paths resolve correctly again
 | File | Change |
 |---|---|
 | `config/config_file.py` | Add `settings.job_bundle_default_directory` to `SETTINGS` |
-| `cli/_groups/bundle_group.py` | Add `deadline bundle list`, `deadline bundle upload`, `deadline bundle download`, `deadline bundle hide`, `deadline bundle unhide`, and `deadline bundle cache` (clean/update) commands |
+| `cli/_groups/bundle_group.py` | Add `deadline bundle list`, `deadline bundle upload`, `deadline bundle download`, `deadline bundle info`, `deadline bundle hide`, `deadline bundle unhide`, and `deadline bundle cache` (clean/update) commands |
 | `ui/dialogs/job_bundle_browser_dialog.py` | **New file.** The browser dialog with filter, Queue/Local/History sources, "Show hidden" toggle, parameter table preview, and right-click context menu for hide/unhide (Queue source). Constructor takes keyword-only args: `queue_source`, `queue_error`, `local_source`, `history_source`. |
 | `ui/dialogs/deadline_config_dialog.py` | Add "Job bundle directory" picker to the settings dialog |
 | `ui/dialogs/submit_job_to_deadline_dialog.py` | Replace "Export" and "Share" buttons with unified "Export bundle" button that opens the export dialog |
@@ -471,6 +471,50 @@ Unhidden bundle: blender-render
 
 $ deadline bundle unhide blender-render
 Bundle is not hidden: blender-render
+```
+
+#### `deadline bundle info <bundle_name>`
+
+Shows detailed information about a job bundle — the same data shown in the browser's preview panel.
+
+- Without `--queue`, `bundle_name` is treated as a local path to a job bundle directory. If the path doesn't exist, searches by name in the current directory and then the configured `settings.job_bundle_default_directory`.
+- With `--queue`, looks up the named bundle on the queue (uses S3 metadata for zero-download preview when available).
+- Output always includes the resolved path so the user knows where the bundle was found.
+- `--output json`: JSON object with path, name, description, steps, and parameters.
+- `--profile`, `--farm-id`, `--queue-id`: Standard config overrides (with `--queue`).
+
+```
+$ deadline bundle info ./my-render-job
+Path: /home/user/my-render-job
+Name: Blender Render
+Description: Renders a Blender scene file using Cycles
+Steps:
+  • RenderBlender
+Parameters:
+  Frames (STRING) = 1-100
+  OutputDir (PATH) = /tmp/output
+
+$ deadline bundle info blender-render --queue
+Path: s3://my-farm-bucket/DeadlineCloud/job-bundles/blender-render.ojd
+Name: Blender Render
+Description: Renders a Blender scene file using Cycles
+Steps:
+  • RenderBlender
+Parameters:
+  Frames (STRING) = 1-100
+  OutputDir (PATH) = /tmp/output
+
+$ deadline bundle info blender-render --queue --output json
+{
+  "path": "s3://my-farm-bucket/DeadlineCloud/job-bundles/blender-render.ojd",
+  "name": "Blender Render",
+  "description": "Renders a Blender scene file using Cycles",
+  "steps": ["RenderBlender"],
+  "parameters": [
+    {"name": "Frames", "type": "STRING", "_display_value": "1-100"},
+    {"name": "OutputDir", "type": "PATH", "_display_value": "/tmp/output"}
+  ]
+}
 ```
 
 ### Bundle Visibility

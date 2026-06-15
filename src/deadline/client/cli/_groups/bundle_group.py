@@ -642,6 +642,7 @@ def bundle_list(path, use_queue, show_hidden, no_archives, output, **args):
                 local_root = config_file.get_setting("settings.job_bundle_default_directory")
             if not local_root:
                 local_root = os.path.expanduser("~")
+            local_root = os.path.expanduser(local_root)
         repo = LocalBundleRepository(root=local_root, include_archives=not no_archives)
 
     entries = repo.list_entries(repo.root_path())
@@ -1007,3 +1008,82 @@ def bundle_unhide(bundle_name, **args):
 
     repo.set_bundle_visibility(bundle_name, hidden=False)
     click.echo(f"Unhidden bundle: {bundle_name}")
+
+
+@cli_bundle.command(name="info")
+@click.argument("bundle_name")
+@click.option(
+    "--queue",
+    "use_queue",
+    is_flag=True,
+    help="Inspect a bundle shared on the queue.",
+)
+@click.option(
+    "--output",
+    type=click.Choice(["verbose", "json"], case_sensitive=False),
+    default="verbose",
+    help="Output format.",
+)
+@click.option("--profile", help="The AWS profile to use.")
+@click.option("--farm-id", help="The farm to use.")
+@click.option("--queue-id", help="The queue to use.")
+@_handle_error
+def bundle_info(bundle_name, use_queue, output, **args):
+    """
+    Show details about a job bundle (name, description, steps, parameters).
+
+    BUNDLE_NAME is either a local path to a job bundle directory, or the name
+    of a shared bundle on the queue (when used with --queue). For local bundles,
+    if the path doesn't exist, searches by name in the current directory and then
+    the configured job bundle default directory.
+    """
+    if use_queue:
+        config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
+        repo: BundleRepository = S3BundleRepository.from_config(config)
+        # Find the bundle by name in the listing
+        entries = repo.list_entries(repo.root_path())
+        match = next((e for e in entries if e.name == bundle_name and e.is_bundle), None)
+        if not match:
+            available = [e.name for e in entries if e.is_bundle]
+            msg = f"Bundle '{bundle_name}' not found on queue."
+            if available:
+                msg += f"\nAvailable bundles: {', '.join(available)}"
+            raise DeadlineOperationError(msg)
+        info = repo.get_bundle_info(match.path)
+    else:
+        bundle_path = os.path.abspath(bundle_name)
+        if not os.path.isdir(bundle_path):
+            # Search by name in cwd, then configured default directory
+            for search_dir in [
+                os.getcwd(),
+                os.path.expanduser(
+                    config_file.get_setting("settings.job_bundle_default_directory") or ""
+                ),
+            ]:
+                if not search_dir:
+                    continue
+                candidate = os.path.join(search_dir, bundle_name)
+                if os.path.isdir(candidate) and is_job_bundle_dir(candidate):
+                    bundle_path = candidate
+                    break
+            else:
+                raise DeadlineOperationError(
+                    f"Bundle '{bundle_name}' not found as a path, in current directory, "
+                    "or in the configured job bundle default directory."
+                )
+        repo = LocalBundleRepository(root=os.path.dirname(bundle_path))
+        info = repo.get_bundle_info(bundle_path)
+
+    if not info:
+        raise DeadlineOperationError(
+            f"Could not read bundle template for '{bundle_name}'. "
+            "The template may be missing or malformed."
+        )
+
+    if output == "json":
+        result = info.to_dict()
+        result["path"] = info.path
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo(f"Path: {info.path}")
+        click.echo(info.format_text())

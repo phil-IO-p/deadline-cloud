@@ -151,6 +151,36 @@ class BundleInfo:
     step_names: list[str] = field(default_factory=list)
     parameters: list[dict] = field(default_factory=list)
 
+    def to_dict(self) -> dict:
+        """Serialize to a dict suitable for JSON output."""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "steps": self.step_names,
+            "parameters": self.parameters,
+        }
+
+    def format_text(self) -> str:
+        """Format as human-readable text."""
+        lines = [f"Name: {self.name}"]
+        if self.description:
+            lines.append(f"Description: {self.description}")
+        if self.step_names:
+            lines.append("Steps:")
+            for step in self.step_names:
+                lines.append(f"  \u2022 {step}")
+        if self.parameters:
+            lines.append("Parameters:")
+            for p in self.parameters:
+                name = p.get("name", "?")
+                ptype = p.get("type", "?")
+                value = p.get("_display_value", "")
+                line = f"  {name} ({ptype})"
+                if value:
+                    line += f" = {value}"
+                lines.append(line)
+        return "\n".join(lines)
+
 
 @dataclass
 class BrowseEntry:
