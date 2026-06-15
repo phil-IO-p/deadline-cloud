@@ -404,9 +404,10 @@ class S3BundleRepository:
         """Create an S3BundleRepository from the user's Deadline Cloud configuration.
 
         Handles session creation, queue lookup, and attachment settings extraction.
+        Uses queue role credentials for S3 access (required for DCM profiles).
         Raises DeadlineOperationError if farm/queue is not configured or has no attachments.
         """
-        from ..api import get_boto3_session
+        from ..api import get_boto3_session, get_queue_user_boto3_session
         from ...job_attachments._aws.deadline import get_queue
 
         farm_id = config_file.get_setting("defaults.farm_id", config=config)
@@ -419,10 +420,20 @@ class S3BundleRepository:
             raise DeadlineOperationError(
                 f"Queue {queue_id} does not have job attachment settings configured."
             )
+
+        # Use queue role credentials for S3 operations
+        deadline_client = session.client("deadline")
+        s3_session = get_queue_user_boto3_session(
+            deadline=deadline_client,
+            config=config,
+            farm_id=farm_id,
+            queue_id=queue_id,
+        )
+
         return cls(
             bucket_name=queue.jobAttachmentSettings.s3BucketName,
             root_prefix=queue.jobAttachmentSettings.rootPrefix,
-            session=session,
+            session=s3_session,
         )
 
     def root_path(self) -> str:
