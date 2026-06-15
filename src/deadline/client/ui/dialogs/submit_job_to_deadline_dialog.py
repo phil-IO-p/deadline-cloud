@@ -753,7 +753,14 @@ class SubmitJobToDeadlineDialog(QDialog):
                 f"Bundle exported to queue:\ns3://{queue_repo._bucket}/{s3_key}",
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Export failed", f"Failed to upload bundle:\n{exc}")
+            from botocore.exceptions import ClientError
+
+            logger.error("Failed to export bundle: %s", exc, exc_info=True)
+            if isinstance(exc, ClientError) and exc.response["Error"]["Code"] == "AccessDenied":
+                msg = "You don't have permission to share bundles on this queue."
+            else:
+                msg = f"Failed to upload bundle:\n{exc}"
+            QMessageBox.critical(self, "Export failed", msg)
 
     def save_job_parameters_to_job_bundle(
         self, job_bundle_dir: str, job_parameters: list[JobParameter]

@@ -407,7 +407,7 @@ class S3BundleRepository:
         Uses queue role credentials for S3 access (required for DCM profiles).
         Raises DeadlineOperationError if farm/queue is not configured or has no attachments.
         """
-        from ..api import get_boto3_session, get_queue_user_boto3_session
+        from ..api import get_boto3_client, get_boto3_session, get_queue_user_boto3_session
         from ...job_attachments._aws.deadline import get_queue
 
         farm_id = config_file.get_setting("defaults.farm_id", config=config)
@@ -422,12 +422,13 @@ class S3BundleRepository:
             )
 
         # Use queue role credentials for S3 operations
-        deadline_client = session.client("deadline")
+        deadline_client = get_boto3_client("deadline", config=config)
         s3_session = get_queue_user_boto3_session(
             deadline=deadline_client,
             config=config,
             farm_id=farm_id,
             queue_id=queue_id,
+            queue_display_name=queue.displayName,
         )
 
         return cls(

@@ -283,7 +283,8 @@ class JobBundleBrowserDialog(QDialog):
         self._preview_params.verticalHeader().setVisible(False)
         self._preview_params.setEditTriggers(QTableWidget.NoEditTriggers)
         self._preview_params.setSelectionMode(QTableWidget.NoSelection)
-        preview_layout.addWidget(self._preview_params, stretch=1)
+        preview_layout.addWidget(self._preview_params)
+        preview_layout.addStretch(1)
 
         self._clear_preview()
 

@@ -581,7 +581,12 @@ def _get_queue_s3_settings(config):
         raise DeadlineOperationError(
             f"Queue {queue_id} does not have job attachment settings configured."
         )
-    return queue.jobAttachmentSettings, boto3_session
+    # Use queue role credentials for S3 access (required for DCM profiles)
+    deadline_client = api.get_boto3_client("deadline", config=config)
+    s3_session = api.get_queue_user_boto3_session(
+        deadline=deadline_client, config=config, farm_id=farm_id, queue_id=queue_id
+    )
+    return queue.jobAttachmentSettings, s3_session
 
 
 @cli_bundle.command(name="list")
