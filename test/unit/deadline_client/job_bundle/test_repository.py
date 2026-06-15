@@ -12,8 +12,13 @@ import zipfile
 import pytest
 import yaml
 
+from unittest.mock import MagicMock, patch
+from botocore.exceptions import ClientError
+
 from deadline.client.job_bundle.repository import (
     LocalBundleRepository,
+    S3BundleRepository,
+    VISIBILITY_MAX_RETRIES,
     _bundle_info_from_s3_metadata,
     _extract_bundle_info,
     _is_archive,
@@ -537,3 +542,175 @@ class TestSanitizeBundleName:
 
     def test_normal_name_unchanged(self):
         assert sanitize_bundle_name("blender-render_v2.1") == "blender-render_v2.1"
+
+
+class TestS3BundleVisibility:
+    def _make_repo(self):
+        """Create an S3BundleRepository with a mocked S3 client."""
+        with patch("boto3.Session"):
+            repo = S3BundleRepository(
+                bucket_name="test-bucket",
+                root_prefix="DeadlineCloud",
+                session=MagicMock(),
+            )
+        repo._s3 = MagicMock()
+        return repo
+
+    def test_get_hidden_set_empty_when_no_manifest(self):
+        repo = self._make_repo()
+        repo._s3.get_object.side_effect = ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        assert repo.get_hidden_set() == set()
+
+    def test_get_hidden_set_returns_names(self):
+        repo = self._make_repo()
+        manifest = json.dumps({"version": 1, "hidden": ["bundle-a", "bundle-b"]})
+        repo._s3.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(return_value=manifest.encode()))
+        }
+        assert repo.get_hidden_set() == {"bundle-a", "bundle-b"}
+
+    def test_set_bundle_visibility_hide(self):
+        repo = self._make_repo()
+        manifest = json.dumps({"version": 1, "hidden": ["existing"]})
+        repo._s3.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(return_value=manifest.encode())),
+            "ETag": '"abc123"',
+        }
+
+        repo.set_bundle_visibility("new-bundle", hidden=True)
+
+        repo._s3.put_object.assert_called_once()
+        call_kwargs = repo._s3.put_object.call_args[1]
+        written = json.loads(call_kwargs["Body"])
+        assert "new-bundle" in written["hidden"]
+        assert "existing" in written["hidden"]
+        assert call_kwargs["IfMatch"] == '"abc123"'
+
+    def test_set_bundle_visibility_unhide(self):
+        repo = self._make_repo()
+        manifest = json.dumps({"version": 1, "hidden": ["bundle-a", "bundle-b"]})
+        repo._s3.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(return_value=manifest.encode())),
+            "ETag": '"abc123"',
+        }
+
+        repo.set_bundle_visibility("bundle-a", hidden=False)
+
+        repo._s3.put_object.assert_called_once()
+        call_kwargs = repo._s3.put_object.call_args[1]
+        written = json.loads(call_kwargs["Body"])
+        assert "bundle-a" not in written["hidden"]
+        assert "bundle-b" in written["hidden"]
+
+    def test_set_bundle_visibility_noop_already_hidden(self):
+        repo = self._make_repo()
+        manifest = json.dumps({"version": 1, "hidden": ["bundle-a"]})
+        repo._s3.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(return_value=manifest.encode())),
+            "ETag": '"abc123"',
+        }
+
+        repo.set_bundle_visibility("bundle-a", hidden=True)
+        repo._s3.put_object.assert_not_called()
+
+    def test_set_bundle_visibility_noop_already_visible(self):
+        repo = self._make_repo()
+        repo._s3.get_object.side_effect = ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+
+        repo.set_bundle_visibility("bundle-a", hidden=False)
+        repo._s3.put_object.assert_not_called()
+
+    def test_set_bundle_visibility_creates_manifest_on_first_hide(self):
+        repo = self._make_repo()
+        repo._s3.get_object.side_effect = ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+
+        repo.set_bundle_visibility("new-bundle", hidden=True)
+
+        repo._s3.put_object.assert_called_once()
+        call_kwargs = repo._s3.put_object.call_args[1]
+        written = json.loads(call_kwargs["Body"])
+        assert written == {"version": 1, "hidden": ["new-bundle"]}
+        assert call_kwargs["IfNoneMatch"] == "*"
+
+    def test_set_bundle_visibility_retries_on_conflict(self):
+        repo = self._make_repo()
+        manifest = json.dumps({"version": 1, "hidden": []})
+        repo._s3.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(return_value=manifest.encode())),
+            "ETag": '"etag1"',
+        }
+        # First put fails with PreconditionFailed, second succeeds
+        repo._s3.put_object.side_effect = [
+            ClientError({"Error": {"Code": "PreconditionFailed"}}, "PutObject"),
+            {},
+        ]
+
+        repo.set_bundle_visibility("bundle-a", hidden=True)
+
+        assert repo._s3.put_object.call_count == 2
+        assert repo._s3.get_object.call_count == 2
+
+    def test_set_bundle_visibility_raises_after_max_retries(self):
+        repo = self._make_repo()
+        manifest = json.dumps({"version": 1, "hidden": []})
+        repo._s3.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(return_value=manifest.encode())),
+            "ETag": '"etag1"',
+        }
+        repo._s3.put_object.side_effect = ClientError(
+            {"Error": {"Code": "PreconditionFailed"}}, "PutObject"
+        )
+
+        from deadline.client.exceptions import DeadlineOperationError
+
+        with pytest.raises(DeadlineOperationError, match="Failed to update bundle visibility"):
+            repo.set_bundle_visibility("bundle-a", hidden=True)
+
+        assert repo._s3.put_object.call_count == VISIBILITY_MAX_RETRIES
+
+    def test_set_bundle_visibility_hidden_list_sorted(self):
+        repo = self._make_repo()
+        manifest = json.dumps({"version": 1, "hidden": ["z-bundle", "a-bundle"]})
+        repo._s3.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(return_value=manifest.encode())),
+            "ETag": '"etag1"',
+        }
+
+        repo.set_bundle_visibility("m-bundle", hidden=True)
+
+        call_kwargs = repo._s3.put_object.call_args[1]
+        written = json.loads(call_kwargs["Body"])
+        assert written["hidden"] == ["a-bundle", "m-bundle", "z-bundle"]
+
+    def test_prune_hidden_set_removes_stale_entries(self):
+        repo = self._make_repo()
+        manifest = json.dumps({"version": 1, "hidden": ["exists", "deleted"]})
+        repo._s3.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(return_value=manifest.encode())),
+            "ETag": '"etag1"',
+        }
+
+        repo.prune_hidden_set(existing_names={"exists", "other"})
+
+        repo._s3.put_object.assert_called_once()
+        call_kwargs = repo._s3.put_object.call_args[1]
+        written = json.loads(call_kwargs["Body"])
+        assert written["hidden"] == ["exists"]
+
+    def test_prune_hidden_set_noop_when_nothing_to_prune(self):
+        repo = self._make_repo()
+        manifest = json.dumps({"version": 1, "hidden": ["exists"]})
+        repo._s3.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(return_value=manifest.encode())),
+            "ETag": '"etag1"',
+        }
+
+        repo.prune_hidden_set(existing_names={"exists", "other"})
+        repo._s3.put_object.assert_not_called()
+
+    def test_prune_hidden_set_noop_when_no_manifest(self):
+        repo = self._make_repo()
+        repo._s3.get_object.side_effect = ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+
+        repo.prune_hidden_set(existing_names={"anything"})
+        repo._s3.put_object.assert_not_called()

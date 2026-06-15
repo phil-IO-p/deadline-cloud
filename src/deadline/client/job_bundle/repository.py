@@ -21,6 +21,8 @@ from typing import Optional, Protocol
 
 import yaml
 
+from botocore.exceptions import ClientError
+
 from ..config import config_file
 from ..config.config_file import get_cache_directory
 from ..exceptions import DeadlineOperationError
@@ -31,6 +33,9 @@ TEMPLATE_FILENAMES = ("template.yaml", "template.json")
 S3_JOB_BUNDLES_PREFIX = "job-bundles"
 ARCHIVE_EXTENSION = ".ojd"
 CACHE_META_FILENAME = ".bundle_cache_meta.json"
+VISIBILITY_MANIFEST_FILENAME = ".bundle-visibility.json"
+VISIBILITY_MANIFEST_VERSION = 1
+VISIBILITY_MAX_RETRIES = 3
 
 # S3 user-defined metadata is limited to 2 KB total (keys + values, UTF-8 encoded).
 # Keys include the "x-amz-meta-" prefix (12 bytes) added by S3.
@@ -632,3 +637,114 @@ class S3BundleRepository:
         """Convert an s3:// URI or prefix to a raw S3 prefix ending with /."""
         key = self._to_s3_key(path)
         return key if key.endswith("/") else key + "/"
+
+    # ── Visibility manifest ──────────────────────────────────
+
+    def _visibility_key(self) -> str:
+        """S3 key for the visibility manifest."""
+        return f"{self._prefix}{VISIBILITY_MANIFEST_FILENAME}"
+
+    def get_hidden_set(self) -> set[str]:
+        """Fetch the set of hidden bundle names from the visibility manifest."""
+        try:
+            resp = self._s3.get_object(Bucket=self._bucket, Key=self._visibility_key())
+            data = json.loads(resp["Body"].read())
+            return set(data.get("hidden", []))
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "NoSuchKey":
+                return set()
+            raise
+
+    def set_bundle_visibility(self, bundle_name: str, *, hidden: bool) -> None:
+        """Hide or unhide a bundle using optimistic concurrency on the manifest.
+
+        Retries transparently on conflict (up to VISIBILITY_MAX_RETRIES attempts).
+        """
+        key = self._visibility_key()
+        for _ in range(VISIBILITY_MAX_RETRIES):
+            etag = None
+            try:
+                resp = self._s3.get_object(Bucket=self._bucket, Key=key)
+                data = json.loads(resp["Body"].read())
+                etag = resp["ETag"]
+            except ClientError as e:
+                if e.response["Error"]["Code"] == "NoSuchKey":
+                    data = {"version": VISIBILITY_MANIFEST_VERSION, "hidden": []}
+                else:
+                    raise
+
+            hidden_set = set(data.get("hidden", []))
+            if hidden and bundle_name in hidden_set:
+                return  # Already hidden
+            if not hidden and bundle_name not in hidden_set:
+                return  # Already visible
+
+            if hidden:
+                hidden_set.add(bundle_name)
+            else:
+                hidden_set.discard(bundle_name)
+
+            data["hidden"] = sorted(hidden_set)
+            data["version"] = VISIBILITY_MANIFEST_VERSION
+            body = json.dumps(data, indent=2)
+
+            put_kwargs: dict = {
+                "Bucket": self._bucket,
+                "Key": key,
+                "Body": body,
+                "ContentType": "application/json",
+            }
+            if etag:
+                put_kwargs["IfMatch"] = etag
+            else:
+                put_kwargs["IfNoneMatch"] = "*"
+
+            try:
+                self._s3.put_object(**put_kwargs)
+                return
+            except ClientError as e:
+                code = e.response["Error"]["Code"]
+                if code in ("PreconditionFailed", "ConditionalCheckFailed"):
+                    continue  # Retry
+                raise
+
+        raise DeadlineOperationError(
+            f"Failed to update bundle visibility after {VISIBILITY_MAX_RETRIES} retries "
+            f"(concurrent modifications). Try again."
+        )
+
+    def prune_hidden_set(self, existing_names: set[str]) -> None:
+        """Remove entries from the hidden manifest that no longer exist in S3.
+
+        Called during listing to keep the manifest tidy. Only writes if entries
+        were actually pruned.
+        """
+        key = self._visibility_key()
+        try:
+            resp = self._s3.get_object(Bucket=self._bucket, Key=key)
+            data = json.loads(resp["Body"].read())
+            etag = resp["ETag"]
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "NoSuchKey":
+                return
+            raise
+
+        hidden_set = set(data.get("hidden", []))
+        pruned = hidden_set - existing_names
+        if not pruned:
+            return
+
+        data["hidden"] = sorted(hidden_set & existing_names)
+        body = json.dumps(data, indent=2)
+        try:
+            self._s3.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=body,
+                ContentType="application/json",
+                IfMatch=etag,
+            )
+            logger.debug("Pruned %d stale entries from visibility manifest", len(pruned))
+        except ClientError:
+            # Best-effort pruning — if it fails (conflict), skip silently
+            logger.debug("Pruning visibility manifest failed (concurrent write), skipping")

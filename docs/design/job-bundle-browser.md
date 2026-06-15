@@ -107,15 +107,19 @@ This is useful for:
 
 The Job History source uses the same `LocalBundleRepository` as the Local source, just rooted at the job history directory instead of the user's home or configured default.
 
-### S3 Archive Caching
+### Archive Caching
 
-Archive bundles from S3 are cached locally to avoid re-downloading on repeated use.
+Archive bundles (both local `.ojd` files and S3 archives) are cached in a unified location to avoid redundant extraction and downloads.
 
 **Cache location**: `~/.deadline/cache/job-bundles/{hash}/{bundle-name}/`
 
-Where `{hash}` is a truncated SHA-256 of `{bucket}/{s3-key}` to ensure uniqueness.
+Where `{hash}` is a truncated SHA-256 of the source identifier:
+- **S3 archives**: `hash(bucket/s3-key)`
+- **Local archives**: `hash(local-file-path)`
 
-**Cache validation**: On each access, a single `head_object` call retrieves the archive's ETag. If it matches the cached ETag, the local copy is used directly. If it differs (or no cache exists), the archive is re-downloaded and re-extracted.
+**Cache validation**:
+- **S3**: A `head_object` call retrieves the archive's ETag. If it matches the cached ETag, the local copy is used. If it differs (or no cache exists), the archive is re-downloaded and re-extracted.
+- **Local**: The file's mtime is compared to the cached mtime. If it differs, the archive is re-extracted in-place.
 
 **Cache metadata** (`.bundle_cache_meta.json`):
 ```json
@@ -125,7 +129,9 @@ Where `{hash}` is a truncated SHA-256 of `{bucket}/{s3-key}` to ensure uniquenes
 }
 ```
 
-**Why only archives are cached**: An archive is a single S3 object with a single ETag — one `head_object` validates the entire bundle.
+For S3 archives, `etag` is used for validation. For local archives, `mtime` (float, seconds since epoch) is stored instead. The fields present indicate the source type.
+
+**Cleanup**: `deadline bundle cache clean` removes cached bundles from this directory. There is no separate temp dir or `atexit` cleanup — all extracted archives live in the cache.
 
 ### S3 Object Metadata for Preview
 
@@ -163,7 +169,7 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 │  Job Bundle Browser                                         │
 ├─────────────────────────────────────────────────────────────┤
 │  Source: (•) Queue  ( ) Local  ( ) History                  │
-│  ☐ Show hidden folders                                      │
+│  ☐ Show hidden                                              │
 ├────────────────────────────────┬────────────────────────────┤
 │  [Filter bundles...         ]  │  Name: Blender Render      │
 │  📁 my-bundles/               │  Description: Renders a    │
@@ -188,7 +194,7 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 
 **Top bar** — Source selection and options:
 - Radio toggle between Queue, Local, and History sources. Queue is selected by default when available; otherwise Local is selected. Queue option is disabled if the queue has no job attachment settings or access fails. When Queue is unavailable, an inline warning label appears below the radio buttons explaining why (e.g. "⚠ **Queue browsing unavailable:** AccessDeniedException...").
-- "Show hidden folders" checkbox — hidden by default, toggling refreshes the tree to include/exclude dot-prefixed directories.
+- "Show hidden" checkbox — unchecked by default, toggling refreshes the tree to include/exclude hidden items. For Local/History sources, this means dot-prefixed directories. For the Queue source, this means bundles marked as hidden via the visibility manifest (see [Bundle Visibility](#bundle-visibility)).
 
 **Left panel** — Filter and navigable tree view:
 - A text filter at the top that narrows the tree as you type. Case-insensitive, matches against entry names. Uses recursive filtering so parent folders remain visible when a child matches. The tree auto-expands when filtering to show results.
@@ -196,7 +202,8 @@ Full template parsing happens only in `get_bundle_info` when the user clicks a b
 - Clicking a folder clears any active filter, expands the folder to show its children, and scrolls it to the top of the view. This makes the search-then-navigate flow natural: search for a folder, click it, see its contents.
 - Job bundles are leaf nodes (selectable, not expandable).
 - Non-bundle, non-archive files are hidden.
-- Hidden folders (names starting with `.`) are hidden by default; toggled via the checkbox.
+- Hidden folders (names starting with `.`) and hidden S3 bundles are hidden by default; toggled via the "Show hidden" checkbox.
+- **Context menu** (Queue source only): Right-clicking a visible bundle shows "Hide bundle"; right-clicking a hidden bundle (when "Show hidden" is checked) shows "Unhide bundle". Hidden bundles are rendered with a dimmed/grayed icon to distinguish them from visible ones. Hide/unhide operations happen in the background with automatic retry on conflict (see [Bundle Visibility](#bundle-visibility)).
 
 **Right panel** — Preview (shown when a bundle is selected, scrollable):
 - **Name**: From the template's `name` field, shown as-is (with `{{Param.X}}` references unresolved).
@@ -234,7 +241,7 @@ The submitter dialog's "Export bundle" button replaces the previous separate "Ex
 **Name** — defaults to the job name with `{{Param.X}}` references resolved using current parameter values. Editable. Used as the `.ojd` filename for Queue or the directory name for Local.
 
 **Save to** — Queue or Local:
-- **Queue**: archives the bundle as `.ojd` and uploads to the queue's S3 `job-bundles/` folder. S3 user metadata (name, description, steps, parameters) is attached for zero-download preview. If a bundle with the same name already exists, the user is prompted to confirm overwrite. When Queue is unavailable (no permissions, no farm/queue configured, no job attachment settings), the radio button is disabled and an inline warning label explains why.
+- **Queue**: archives the bundle as `.ojd` and uploads to the queue's S3 `job-bundles/` folder. S3 user metadata (name, description, steps, parameters) is attached for zero-download preview. If a bundle with the same name already exists, the user is prompted to confirm overwrite. If the existing bundle is hidden, the prompt warns "A hidden bundle with this name already exists" with three options: Cancel, Overwrite (keeps it hidden), or Overwrite and unhide. When Queue is unavailable (no permissions, no farm/queue configured, no job attachment settings), the radio button is disabled and an inline warning label explains why.
 - **Local**: saves the bundle as a directory to the specified location. Defaults to `settings.job_bundle_default_directory` — the same path the browser's Local source browses. The exported bundle immediately appears when browsing Local.
 
 **Location** — always visible, updates based on the selected source:
@@ -281,8 +288,8 @@ After the user selects a bundle in the browser, it must be resolved to a local d
 | Source | Format | Resolution | Cleanup |
 |---|---|---|---|
 | Local | Directory | Used directly (no copy) | None needed |
-| Local | Archive (.ojd) | Extracted to temp dir | atexit cleanup |
-| S3 | Archive (.ojd) | Downloaded, cached with ETag, extracted to cache dir | Persists in cache |
+| Local | Archive (.ojd) | Extracted to cache dir (`hash(path)` + mtime validation) | `deadline bundle cache clean` |
+| S3 | Archive (.ojd) | Downloaded to cache dir (`hash(bucket/key)` + ETag validation), extracted | `deadline bundle cache clean` |
 
 The CLI `deadline bundle download` command downloads the `.ojd` archive, caches it locally with ETag validation, and extracts it to the output directory.
 
@@ -295,15 +302,15 @@ Bundled assets (scripts, data files) with relative paths resolve correctly again
 | File | Change |
 |---|---|
 | `config/config_file.py` | Add `settings.job_bundle_default_directory` to `SETTINGS` |
-| `cli/_groups/bundle_group.py` | Add `deadline bundle list`, `deadline bundle upload`, `deadline bundle download`, and `deadline bundle cache` (clean/update) commands |
-| `ui/dialogs/job_bundle_browser_dialog.py` | **New file.** The browser dialog with filter, Queue/Local/History sources, hidden folder toggle, parameter table preview. Constructor takes keyword-only args: `queue_source`, `queue_error`, `local_source`, `history_source`. |
+| `cli/_groups/bundle_group.py` | Add `deadline bundle list`, `deadline bundle upload`, `deadline bundle download`, `deadline bundle hide`, `deadline bundle unhide`, and `deadline bundle cache` (clean/update) commands |
+| `ui/dialogs/job_bundle_browser_dialog.py` | **New file.** The browser dialog with filter, Queue/Local/History sources, "Show hidden" toggle, parameter table preview, and right-click context menu for hide/unhide (Queue source). Constructor takes keyword-only args: `queue_source`, `queue_error`, `local_source`, `history_source`. |
 | `ui/dialogs/deadline_config_dialog.py` | Add "Job bundle directory" picker to the settings dialog |
 | `ui/dialogs/submit_job_to_deadline_dialog.py` | Replace "Export" and "Share" buttons with unified "Export bundle" button that opens the export dialog |
 | `ui/dialogs/export_bundle_dialog.py` | **New file.** Export dialog with Queue/Local destination, name override, and location display |
 | `ui/widgets/job_bundle_settings_tab.py` | `on_load_bundle` opens the new browser dialog instead of `QFileDialog` |
 | `ui/job_bundle_submitter.py` | `show_job_bundle_submitter` uses the new browser dialog when `browse=True`; handles archive extraction and S3 resolution |
 | `job_bundle/loader.py` | Add `is_job_bundle_dir(path) -> bool` helper for quick detection |
-| `job_bundle/repository.py` | **New file.** `BundleRepository` protocol, `LocalBundleRepository`, `S3BundleRepository` (with `from_config()` factory), archive helpers, cache management, metadata constants |
+| `job_bundle/repository.py` | **New file.** `BundleRepository` protocol, `LocalBundleRepository`, `S3BundleRepository` (with `from_config()` factory), archive helpers, cache management, metadata constants, visibility manifest read/write with optimistic concurrency |
 
 ### CLI Commands
 
@@ -313,7 +320,8 @@ Lists job bundles in a local directory or the queue's S3 `job-bundles/` folder.
 
 - With no arguments, lists bundles in the configured default local directory (`settings.job_bundle_default_directory`, or home if not set). No AWS config needed.
 - With `path`, lists bundles in that local directory.
-- With `--queue`, lists bundles shared on the queue (requires farm and queue).
+- With `--queue`, lists bundles shared on the queue (requires farm and queue). Hidden bundles are excluded by default.
+- With `--queue --show-hidden`, includes hidden bundles in the output (marked with `(hidden)` in plain text, `"hidden": true` in JSON).
 - Default output is one bundle name per line, suitable for piping.
 - `--output json`: JSON array with name, format (archive/folder), and path.
 
@@ -329,6 +337,12 @@ $ deadline bundle list --queue
 blender-render
 maya-arnold
 monte_carlo_simulation
+
+$ deadline bundle list --queue --show-hidden
+blender-render
+maya-arnold
+monte_carlo_simulation
+old-maya-job (hidden)
 
 $ deadline bundle list --queue --output json
 [{"name": "blender-render", "path": "s3://bucket/prefix/job-bundles/blender-render.ojd", "format": "archive"}, ...]
@@ -427,6 +441,97 @@ $ deadline bundle download blender-render -o /tmp/bundles
 Downloaded bundle to: /tmp/bundles/blender-render
 ```
 
+#### `deadline bundle hide <bundle_name>`
+
+Hides a shared bundle on the queue. The bundle remains in S3 but is no longer shown in the browser or `deadline bundle list` by default.
+
+- Updates the `.bundle-visibility.json` manifest using conditional writes (automatic retry on conflict).
+- `--profile`, `--farm-id`, `--queue-id`: Standard config overrides.
+- No-op if the bundle is already hidden.
+
+```
+$ deadline bundle hide blender-render
+Hidden bundle: blender-render
+
+$ deadline bundle hide blender-render
+Bundle already hidden: blender-render
+```
+
+#### `deadline bundle unhide <bundle_name>`
+
+Unhides a previously hidden bundle, making it visible again in the browser and `deadline bundle list`.
+
+- Updates the `.bundle-visibility.json` manifest using conditional writes (automatic retry on conflict).
+- `--profile`, `--farm-id`, `--queue-id`: Standard config overrides.
+- No-op if the bundle is not hidden.
+
+```
+$ deadline bundle unhide blender-render
+Unhidden bundle: blender-render
+
+$ deadline bundle unhide blender-render
+Bundle is not hidden: blender-render
+```
+
+### Bundle Visibility
+
+Bundles shared on S3 can be "hidden" without deleting them. This is the S3 equivalent of dot-prefixed hidden folders on local filesystems — bundles remain accessible but are not shown in the browser by default.
+
+**Mechanism — sidecar manifest with optimistic concurrency:**
+
+A single JSON file stores the list of hidden bundle names:
+
+```
+s3://{bucket}/{rootPrefix}/job-bundles/.bundle-visibility.json
+```
+
+```json
+{
+  "version": 1,
+  "hidden": ["blender-render", "old-maya-job"]
+}
+```
+
+The `version` field allows evolving the format in the future (e.g. adding per-entry comments or timestamps) without breaking older clients. The `hidden` array contains bundle names (without the `.ojd` extension) — these correspond 1:1 with object keys since duplicate names are not allowed in the same folder. In Python, the array is deserialized into a `set` for O(1) lookup, and serialized back as a sorted list for stable output.
+
+**Scope:** A single manifest exists at the `job-bundles/` root and covers all bundles including those in subfolders (stored as relative paths, e.g. `"rendering/custom-renderer"`). This avoids additional S3 calls to fetch per-subfolder manifests.
+
+**Re-upload behavior:** If a hidden bundle is re-uploaded (overwritten), it remains hidden. The hide is "sticky" to the name. This is intentional — hiding expresses "this name shouldn't clutter the default view" regardless of the object's content. The export dialog handles this explicitly (see [Export Bundle](#export-bundle)).
+
+**Pruning:** When the manifest is read during listing, any entries that don't match an existing bundle are silently removed. The pruned manifest is written back (using the same conditional write) only if entries were actually removed. This prevents unbounded growth from bundles that were deleted directly via S3.
+
+**Sync behavior:** The manifest is fetched fresh (single `GetObject`) alongside `list_objects_v2` every time the Queue source is loaded or refreshed. There is no persistent local copy or background polling. If a teammate hides a bundle, the change is visible next time the browser loads the listing.
+
+**Why a sidecar manifest?** `list_objects_v2` does not return per-object user metadata or tags. A per-object approach would require a `head_object` call for every bundle during listing. The sidecar is fetched with a single `GetObject` during listing, making hidden-bundle filtering zero-cost per bundle.
+
+**Concurrency control:** Updates use S3 conditional writes (`If-Match` on ETag) to prevent lost updates when multiple users hide/unhide simultaneously:
+
+1. `GetObject` on `.bundle-visibility.json` → get contents + ETag (or handle `NoSuchKey` for first use).
+2. Modify the hidden set locally.
+3. `PutObject` with `If-Match: <etag>` (or `If-None-Match: *` for creation).
+4. On `412 Precondition Failed`, retry from step 1 (up to 3 attempts).
+
+Retries are transparent to the user — the operation either succeeds silently or shows an inline error after exhausting retries.
+
+**Browser behavior:**
+
+- When "Show hidden" is unchecked (default), bundles in the hidden list are excluded from the tree.
+- When "Show hidden" is checked, hidden bundles appear with a dimmed/grayed 📦 icon.
+- Right-click context menu on bundles (Queue source only):
+  - Visible bundle → "Hide bundle"
+  - Hidden bundle → "Unhide bundle"
+- After hide/unhide, the tree refreshes to reflect the change.
+
+**Permissions:** Hiding/unhiding requires `s3:GetObject` and `s3:PutObject` on the `.bundle-visibility.json` key. Users with read-only access can still browse (the manifest is read during listing) but cannot hide/unhide.
+
+### Progress Indication
+
+Operations that involve network I/O show progress to the user:
+
+- **Browser dialog**: When selecting an S3 bundle and clicking "Select", a progress spinner replaces the Select button label while the archive is downloaded/resolved. The dialog remains responsive (download happens on a background thread).
+- **Export dialog**: When uploading to Queue, a progress bar appears below the Export button showing upload progress. Cancel is available during upload.
+- **CLI**: `deadline bundle upload` and `deadline bundle download` show a progress bar (using the same style as job attachment uploads). `deadline bundle hide`/`unhide` complete fast enough to not need progress.
+
 ### Error Handling
 
 Errors are displayed inline rather than as popup dialogs:
@@ -436,6 +541,7 @@ Errors are displayed inline rather than as popup dialogs:
 - **Expand failure** (subfolder listing fails): A disabled `⚠ Error: {message}` entry appears in the tree under that folder.
 - **Preview failure** (malformed template, missing fields): The preview panel shows "⚠ Error" with "Could not read bundle template" and the tree entry icon changes from 📦 to ⚠.
 - **Double-click**: Double-clicking a bundle selects it and accepts the dialog. Double-clicking a folder does nothing.
+- **Hide/unhide failure** (insufficient permissions or conflict): The context menu action is always shown. If the operation fails (e.g. `AccessDeniedException`), an inline warning appears below the tree: "⚠ Could not hide bundle: AccessDeniedException".
 
 ### Archive Safety
 
@@ -465,10 +571,20 @@ This means the S3 key preserves the original name as-is (all characters are vali
 ### S3 Considerations
 
 - **Authentication**: S3 browsing and CLI commands use `api.get_boto3_session()` which respects the configured AWS profile in `~/.deadline/config`. The `S3BundleRepository.from_config()` factory method encapsulates session creation, queue lookup, and settings extraction in one place. No separate auth flow.
-- **Permissions**: Requires `s3:ListBucket` and `s3:GetObject` on the queue's attachment bucket for browsing/download. Upload additionally requires `s3:PutObject`. If access is denied, show an error rather than crashing.
+- **Permissions**: Requires `s3:ListBucket` and `s3:GetObject` on the queue's attachment bucket for browsing/download. Upload additionally requires `s3:PutObject`. Hiding/unhiding bundles requires `s3:GetObject` and `s3:PutObject` on the `.bundle-visibility.json` key. If access is denied, show an error rather than crashing.
 - **Performance**: Listing is a single paginated `list_objects_v2` call with delimiter. Archive preview with S3 metadata is 1 `head_object` (no download). Cached archive selection is 1 `head_object`.
 - **S3 object metadata**: `deadline bundle upload` attaches bundle name, description, steps, and parameters as S3 user metadata. This enables zero-download preview via `head_object`. Archives uploaded by other means fall back to downloading the archive for preview.
 - **Bundled assets**: Scripts, data files, and other assets within the bundle are included in the archive. Relative PATH parameters resolve against the extracted copy.
+
+### MCP Server Integration
+
+The MCP server exposes bundle sharing operations as tools for AI assistants:
+
+- **list_shared_bundles** — Lists bundles on the queue (respects visibility, supports `show_hidden`).
+- **upload_bundle** — Uploads a local job bundle to the queue as an `.ojd` archive.
+- **download_bundle** — Downloads a shared bundle from the queue to a local directory.
+
+These tools use the same `S3BundleRepository` as the CLI and GUI, so behavior is consistent. Hide/unhide is not exposed via MCP — it's a management action better suited to direct user intent via CLI or GUI.
 
 ## Out of Scope (Future)
 

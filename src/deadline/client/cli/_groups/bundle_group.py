@@ -593,6 +593,11 @@ def _get_queue_s3_settings(config):
     help="List bundles shared on the queue.",
 )
 @click.option(
+    "--show-hidden",
+    is_flag=True,
+    help="Include hidden bundles in the output (queue only).",
+)
+@click.option(
     "--no-archives",
     is_flag=True,
     help="Skip archive files when listing local bundles.",
@@ -607,7 +612,7 @@ def _get_queue_s3_settings(config):
     help="Output format. TEXT prints one name per line, JSON prints full details.",
 )
 @_handle_error
-def bundle_list(path, use_queue, no_archives, output, **args):
+def bundle_list(path, use_queue, show_hidden, no_archives, output, **args):
     """
     List job bundles.
 
@@ -618,9 +623,11 @@ def bundle_list(path, use_queue, no_archives, output, **args):
     With --queue, lists bundles shared on the queue.
     """
 
+    hidden_set: set[str] = set()
     if use_queue:
         config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
         repo: BundleRepository = S3BundleRepository.from_config(config)
+        hidden_set = repo.get_hidden_set()  # type: ignore[attr-defined]
     else:
         if path:
             local_root = os.path.abspath(path)
@@ -635,19 +642,30 @@ def bundle_list(path, use_queue, no_archives, output, **args):
     entries = repo.list_entries(repo.root_path())
     bundles = [e for e in entries if e.is_bundle]
 
+    # Filter hidden bundles unless --show-hidden
+    if use_queue and not show_hidden:
+        bundles = [e for e in bundles if e.name not in hidden_set]
+
+    # Prune stale hidden entries
+    if use_queue and hidden_set:
+        existing_names = {e.name for e in entries if e.is_bundle}
+        repo.prune_hidden_set(existing_names)  # type: ignore[attr-defined]
+
     if output == "json":
         result = [
             {
                 "name": e.name,
                 "path": e.path,
                 "format": "archive" if e.is_archive else "folder",
+                **({"hidden": True} if e.name in hidden_set else {}),
             }
             for e in bundles
         ]
         click.echo(json.dumps(result, indent=2))
     else:
         for e in bundles:
-            click.echo(e.name)
+            suffix = " (hidden)" if e.name in hidden_set else ""
+            click.echo(f"{e.name}{suffix}")
 
 
 @cli_bundle.group(name="cache")
@@ -935,3 +953,52 @@ def bundle_download(bundle_name, output_dir, **args):
         shutil.rmtree(dest_path)
     shutil.copytree(local_path, dest_path)
     click.echo(f"Downloaded bundle to: {dest_path}")
+
+
+@cli_bundle.command(name="hide")
+@click.argument("bundle_name")
+@click.option("--profile", help="The AWS profile to use.")
+@click.option("--farm-id", help="The farm to use.")
+@click.option("--queue-id", help="The queue to use.")
+@_handle_error
+def bundle_hide(bundle_name, **args):
+    """
+    Hide a shared bundle on the queue.
+
+    The bundle remains in S3 but is no longer shown in the browser or
+    `deadline bundle list` by default. Use --show-hidden to see it.
+    """
+    config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
+    repo = S3BundleRepository.from_config(config)
+
+    hidden_set = repo.get_hidden_set()
+    if bundle_name in hidden_set:
+        click.echo(f"Bundle already hidden: {bundle_name}")
+        return
+
+    repo.set_bundle_visibility(bundle_name, hidden=True)
+    click.echo(f"Hidden bundle: {bundle_name}")
+
+
+@cli_bundle.command(name="unhide")
+@click.argument("bundle_name")
+@click.option("--profile", help="The AWS profile to use.")
+@click.option("--farm-id", help="The farm to use.")
+@click.option("--queue-id", help="The queue to use.")
+@_handle_error
+def bundle_unhide(bundle_name, **args):
+    """
+    Unhide a previously hidden bundle on the queue.
+
+    Makes the bundle visible again in the browser and `deadline bundle list`.
+    """
+    config = _apply_cli_options_to_config(required_options={"farm_id", "queue_id"}, **args)
+    repo = S3BundleRepository.from_config(config)
+
+    hidden_set = repo.get_hidden_set()
+    if bundle_name not in hidden_set:
+        click.echo(f"Bundle is not hidden: {bundle_name}")
+        return
+
+    repo.set_bundle_visibility(bundle_name, hidden=False)
+    click.echo(f"Unhidden bundle: {bundle_name}")

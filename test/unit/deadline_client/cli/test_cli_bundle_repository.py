@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from deadline.client.cli import main
 from deadline.client.job_bundle.repository import (
+    BrowseEntry,
     METADATA_LIMIT_DESC,
     METADATA_LIMIT_NAME,
     METADATA_LIMIT_PARAMS,
@@ -123,9 +124,6 @@ class TestBundleUpload:
         result = runner.invoke(main, ["bundle", "upload", str(not_bundle)])
         assert result.exit_code == 1
         assert "not appear to be a job bundle" in result.output
-
-
-REPO_MODULE = "deadline.client.job_bundle.repository"
 
 
 class TestBundleCacheClean:
@@ -323,3 +321,149 @@ class TestBundleUploadOverwrite:
         assert result.exit_code == 0, result.output
         assert "canceled" in result.output.lower()
         mock_s3.upload_fileobj.assert_not_called()
+
+
+class TestBundleHide:
+    @patch(f"{BUNDLE_GROUP}._apply_cli_options_to_config")
+    @patch(f"{BUNDLE_GROUP}.S3BundleRepository.from_config")
+    def test_hide_bundle(self, mock_from_config, mock_config):
+        mock_repo = MagicMock()
+        mock_repo.get_hidden_set.return_value = set()
+        mock_from_config.return_value = mock_repo
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["bundle", "hide", "blender-render"])
+
+        assert result.exit_code == 0, result.output
+        assert "Hidden bundle: blender-render" in result.output
+        mock_repo.set_bundle_visibility.assert_called_once_with("blender-render", hidden=True)
+
+    @patch(f"{BUNDLE_GROUP}._apply_cli_options_to_config")
+    @patch(f"{BUNDLE_GROUP}.S3BundleRepository.from_config")
+    def test_hide_already_hidden(self, mock_from_config, mock_config):
+        mock_repo = MagicMock()
+        mock_repo.get_hidden_set.return_value = {"blender-render"}
+        mock_from_config.return_value = mock_repo
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["bundle", "hide", "blender-render"])
+
+        assert result.exit_code == 0, result.output
+        assert "already hidden" in result.output
+        mock_repo.set_bundle_visibility.assert_not_called()
+
+
+class TestBundleUnhide:
+    @patch(f"{BUNDLE_GROUP}._apply_cli_options_to_config")
+    @patch(f"{BUNDLE_GROUP}.S3BundleRepository.from_config")
+    def test_unhide_bundle(self, mock_from_config, mock_config):
+        mock_repo = MagicMock()
+        mock_repo.get_hidden_set.return_value = {"blender-render"}
+        mock_from_config.return_value = mock_repo
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["bundle", "unhide", "blender-render"])
+
+        assert result.exit_code == 0, result.output
+        assert "Unhidden bundle: blender-render" in result.output
+        mock_repo.set_bundle_visibility.assert_called_once_with("blender-render", hidden=False)
+
+    @patch(f"{BUNDLE_GROUP}._apply_cli_options_to_config")
+    @patch(f"{BUNDLE_GROUP}.S3BundleRepository.from_config")
+    def test_unhide_not_hidden(self, mock_from_config, mock_config):
+        mock_repo = MagicMock()
+        mock_repo.get_hidden_set.return_value = set()
+        mock_from_config.return_value = mock_repo
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["bundle", "unhide", "blender-render"])
+
+        assert result.exit_code == 0, result.output
+        assert "not hidden" in result.output
+        mock_repo.set_bundle_visibility.assert_not_called()
+
+
+class TestBundleListShowHidden:
+    @patch(f"{BUNDLE_GROUP}._apply_cli_options_to_config")
+    @patch(f"{BUNDLE_GROUP}.S3BundleRepository.from_config")
+    def test_list_queue_hides_hidden_by_default(self, mock_from_config, mock_config):
+        mock_repo = MagicMock()
+        mock_repo.get_hidden_set.return_value = {"old-job"}
+        mock_repo.root_path.return_value = "s3://bucket/prefix/job-bundles/"
+        mock_repo.list_entries.return_value = [
+            BrowseEntry(
+                name="blender-render",
+                path="s3://b/p/blender-render.ojd",
+                is_bundle=True,
+                is_archive=True,
+            ),
+            BrowseEntry(
+                name="old-job", path="s3://b/p/old-job.ojd", is_bundle=True, is_archive=True
+            ),
+        ]
+        mock_from_config.return_value = mock_repo
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["bundle", "list", "--queue"])
+
+        assert result.exit_code == 0, result.output
+        assert "blender-render" in result.output
+        assert "old-job" not in result.output
+
+    @patch(f"{BUNDLE_GROUP}._apply_cli_options_to_config")
+    @patch(f"{BUNDLE_GROUP}.S3BundleRepository.from_config")
+    def test_list_queue_show_hidden(self, mock_from_config, mock_config):
+        mock_repo = MagicMock()
+        mock_repo.get_hidden_set.return_value = {"old-job"}
+        mock_repo.root_path.return_value = "s3://bucket/prefix/job-bundles/"
+        mock_repo.list_entries.return_value = [
+            BrowseEntry(
+                name="blender-render",
+                path="s3://b/p/blender-render.ojd",
+                is_bundle=True,
+                is_archive=True,
+            ),
+            BrowseEntry(
+                name="old-job", path="s3://b/p/old-job.ojd", is_bundle=True, is_archive=True
+            ),
+        ]
+        mock_from_config.return_value = mock_repo
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["bundle", "list", "--queue", "--show-hidden"])
+
+        assert result.exit_code == 0, result.output
+        assert "blender-render" in result.output
+        assert "old-job (hidden)" in result.output
+
+    @patch(f"{BUNDLE_GROUP}._apply_cli_options_to_config")
+    @patch(f"{BUNDLE_GROUP}.S3BundleRepository.from_config")
+    def test_list_queue_show_hidden_json(self, mock_from_config, mock_config):
+        mock_repo = MagicMock()
+        mock_repo.get_hidden_set.return_value = {"old-job"}
+        mock_repo.root_path.return_value = "s3://bucket/prefix/job-bundles/"
+        mock_repo.list_entries.return_value = [
+            BrowseEntry(
+                name="blender-render",
+                path="s3://b/p/blender-render.ojd",
+                is_bundle=True,
+                is_archive=True,
+            ),
+            BrowseEntry(
+                name="old-job", path="s3://b/p/old-job.ojd", is_bundle=True, is_archive=True
+            ),
+        ]
+        mock_from_config.return_value = mock_repo
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["bundle", "list", "--queue", "--show-hidden", "--output", "json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert len(data) == 2
+        hidden_entry = next(e for e in data if e["name"] == "old-job")
+        visible_entry = next(e for e in data if e["name"] == "blender-render")
+        assert hidden_entry["hidden"] is True
+        assert "hidden" not in visible_entry
