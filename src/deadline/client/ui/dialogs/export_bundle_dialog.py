@@ -20,7 +20,7 @@ from qtpy.QtWidgets import (  # type: ignore
     QVBoxLayout,
 )
 
-from .._utils import tr
+from .._utils import tr, warning_banner_qss
 from ...job_bundle.repository import S3BundleRepository
 
 
@@ -86,11 +86,7 @@ class ExportBundleDialog(QDialog):
         self._queue_warning = QLabel()
         self._queue_warning.setWordWrap(True)
         self._queue_warning.setTextFormat(Qt.RichText)
-        self._queue_warning.setStyleSheet(
-            "QLabel { color: #b35900; background-color: #fff3e0;"
-            " border: 1px solid #ffcc80; border-radius: 4px;"
-            " padding: 4px 8px; }"
-        )
+        self._queue_warning.setStyleSheet(warning_banner_qss(self))
         if not self._queue_available and self._queue_error:
             self._queue_warning.setText(f"\u26a0 <b>Queue unavailable:</b> {self._queue_error}")
             self._queue_warning.setVisible(True)
