@@ -4,6 +4,8 @@
 Tests the deadline.client.api functions for submitting Open Job Description job bundles.
 """
 
+import copy
+import inspect
 import json
 import os
 from logging import INFO
@@ -1095,6 +1097,165 @@ def test_create_job_from_job_bundle_without_target_task_run_status(
         create_job_call = mock.get_boto3_client().create_job.call_args
         assert create_job_call is not None
         assert "targetTaskRunStatus" not in create_job_call.kwargs
+
+
+MINIMAL_TEMPLATE = '{"specificationVersion": "jobtemplate-2023-09", "name": "TestJob", "steps": []}'
+TWO_DEPENDENCIES = [{"jobId": "job-a"}, {"jobId": "job-b"}]
+
+
+def _submit_with_dependencies(bundle_dir, **kwargs):
+    config.set_setting("defaults.farm_id", MOCK_FARM_ID)
+    config.set_setting("defaults.queue_id", MOCK_QUEUE_ID)
+    with open(os.path.join(bundle_dir, "template.json"), "w", encoding="utf8") as f:
+        f.write(MINIMAL_TEMPLATE)
+    with patch_calls_for_create_job_from_job_bundle() as mock:
+        api.create_job_from_job_bundle(bundle_dir, queue_parameter_definitions=[], **kwargs)
+        return mock.get_boto3_client().create_job
+
+
+def test_create_job_from_job_bundle_dependencies_signature():
+    parameter = inspect.signature(api.create_job_from_job_bundle).parameters["dependencies"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is None
+
+
+def test_create_job_from_job_bundle_dependencies_passed_through(
+    fresh_deadline_config, temp_job_bundle_dir
+):
+    create_job = _submit_with_dependencies(
+        temp_job_bundle_dir, dependencies=copy.deepcopy(TWO_DEPENDENCIES)
+    )
+
+    create_job.assert_called_once()
+    assert create_job.call_args.kwargs["dependencies"] == TWO_DEPENDENCIES
+
+
+@pytest.mark.parametrize("dependencies", [None, []])
+def test_create_job_from_job_bundle_no_dependencies_omits_key(
+    fresh_deadline_config, temp_job_bundle_dir, dependencies
+):
+    create_job = _submit_with_dependencies(temp_job_bundle_dir, dependencies=dependencies)
+
+    assert "dependencies" not in create_job.call_args.kwargs
+    assert "targetTaskRunStatus" not in create_job.call_args.kwargs
+
+
+def test_create_job_from_job_bundle_dependencies_omitted_omits_key(
+    fresh_deadline_config, temp_job_bundle_dir
+):
+    create_job = _submit_with_dependencies(temp_job_bundle_dir)
+
+    assert "dependencies" not in create_job.call_args.kwargs
+    assert "targetTaskRunStatus" not in create_job.call_args.kwargs
+
+
+def test_create_job_from_job_bundle_dependencies_default_to_pending(
+    fresh_deadline_config, temp_job_bundle_dir
+):
+    create_job = _submit_with_dependencies(temp_job_bundle_dir, dependencies=TWO_DEPENDENCIES)
+
+    assert create_job.call_args.kwargs["targetTaskRunStatus"] == "PENDING"
+
+
+@pytest.mark.parametrize("status", ["SUSPENDED", "READY"])
+def test_create_job_from_job_bundle_dependencies_keep_explicit_status(
+    fresh_deadline_config, temp_job_bundle_dir, status
+):
+    create_job = _submit_with_dependencies(
+        temp_job_bundle_dir, dependencies=TWO_DEPENDENCIES, target_task_run_status=status
+    )
+
+    assert create_job.call_args.kwargs["targetTaskRunStatus"] == status
+
+
+def test_create_job_from_job_bundle_dependencies_keep_status_from_bundle(
+    fresh_deadline_config, temp_job_bundle_dir
+):
+    with open(
+        os.path.join(temp_job_bundle_dir, "parameter_values.json"), "w", encoding="utf8"
+    ) as f:
+        f.write(
+            '{"parameterValues": [{"name": "deadline:targetTaskRunStatus", "value": "SUSPENDED"}]}'
+        )
+
+    create_job = _submit_with_dependencies(temp_job_bundle_dir, dependencies=TWO_DEPENDENCIES)
+
+    assert create_job.call_args.kwargs["targetTaskRunStatus"] == "SUSPENDED"
+
+
+def test_create_job_from_job_bundle_dependencies_keyword_beats_bundle_status(
+    fresh_deadline_config, temp_job_bundle_dir
+):
+    with open(
+        os.path.join(temp_job_bundle_dir, "parameter_values.json"), "w", encoding="utf8"
+    ) as f:
+        f.write('{"parameterValues": [{"name": "deadline:targetTaskRunStatus", "value": "READY"}]}')
+
+    create_job = _submit_with_dependencies(
+        temp_job_bundle_dir,
+        dependencies=TWO_DEPENDENCIES,
+        target_task_run_status="SUSPENDED",
+    )
+
+    assert create_job.call_args.kwargs["targetTaskRunStatus"] == "SUSPENDED"
+
+
+def test_create_job_from_job_bundle_bundle_dependencies_parameter_is_unrecognized(
+    fresh_deadline_config, temp_job_bundle_dir
+):
+    with open(
+        os.path.join(temp_job_bundle_dir, "parameter_values.json"), "w", encoding="utf8"
+    ) as f:
+        f.write(
+            '{"parameterValues": [{"name": "deadline:dependencies", "value": [{"jobId": "job-a"}]}]}'
+        )
+
+    with pytest.raises(exceptions.DeadlineOperationError, match="Unrecognized parameter named"):
+        _submit_with_dependencies(temp_job_bundle_dir)
+
+
+def test_create_job_from_job_bundle_dependencies_in_debug_snapshot(
+    fresh_deadline_config, temp_job_bundle_dir, tmp_path
+):
+    create_job = _submit_with_dependencies(
+        temp_job_bundle_dir, dependencies=TWO_DEPENDENCIES, debug_snapshot_dir=str(tmp_path)
+    )
+
+    create_job.assert_not_called()
+    with open(tmp_path / "dependencies_param.json", encoding="utf-8") as f:
+        assert json.load(f) == TWO_DEPENDENCIES
+    assert "--dependencies file://dependencies_param.json" in (
+        tmp_path / "submit_job.sh"
+    ).read_text(encoding="utf-8")
+
+
+def test_create_job_from_job_bundle_dependencies_not_limited_by_library(
+    fresh_deadline_config, temp_job_bundle_dir
+):
+    dependencies = [{"jobId": f"job-{i:03d}"} for i in range(41)]
+
+    create_job = _submit_with_dependencies(temp_job_bundle_dir, dependencies=dependencies)
+
+    create_job.assert_called_once()
+    assert create_job.call_args.kwargs["dependencies"] == dependencies
+
+
+def test_create_job_from_job_bundle_dependencies_in_post_submission_hook_payload(
+    fresh_deadline_config, temp_job_bundle_dir
+):
+    config.set_setting("settings.allow_bundle_hooks", "true")
+    config.set_setting("settings.auto_accept", "true")
+    payload_file = os.path.join(temp_job_bundle_dir, "hook_stdin.json")
+    with open(os.path.join(temp_job_bundle_dir, "hooks.yaml"), "w", encoding="utf8") as f:
+        f.write("version: '1.0'\npostSubmission:\n  - command: python3\n    args: [dump.py]\n")
+    with open(os.path.join(temp_job_bundle_dir, "dump.py"), "w", encoding="utf8") as f:
+        f.write(f"import sys\nopen({payload_file!r}, 'w').write(sys.stdin.read())\n")
+
+    _submit_with_dependencies(temp_job_bundle_dir, dependencies=TWO_DEPENDENCIES)
+
+    with open(payload_file, encoding="utf8") as f:
+        hook_input = json.load(f)
+    assert hook_input["submissionPayload"]["dependencies"] == TWO_DEPENDENCIES
 
 
 def test_create_job_from_job_bundle_expr_lowercase_parameter_types(

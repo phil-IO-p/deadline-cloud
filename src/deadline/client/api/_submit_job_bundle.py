@@ -694,6 +694,7 @@ def create_job_from_job_bundle(
     create_job_result_callback: Optional[Callable[[], bool]] = None,
     force_s3_check: Optional[bool] = None,
     as_submitted_bundle_dir: Optional[str] = None,
+    dependencies: Optional[list[dict[str, str]]] = None,
 ) -> Optional[str]:
     """
     Creates a [Deadline Cloud job] in the [queue] configured as default for the workstation
@@ -744,7 +745,8 @@ def create_job_from_job_bundle(
         max_retries_per_task (int, optional): explicit value for the maximum retries per task.
         max_worker_count (int, optional): explicit value for the max worker count of the job.
         target_task_run_status (str, optional): explicit value for the target task run status of the job.
-                Valid values are "READY" or "SUSPENDED".
+                Valid values are "READY", "SUSPENDED" or "PENDING". When dependencies is
+                non-empty and no target task run status is set, "PENDING" is used.
         require_paths_exist (bool, optional): Whether to require that all input paths exist.
         submitter_name (str, optional): Name of the application submitting the bundle.
         known_asset_paths (list[str], optional): A list of paths that should not generate
@@ -771,6 +773,8 @@ def create_job_from_job_bundle(
                 holding the template, parameter values, job properties, and asset references as submitted
                 (after the hooks changed them) is saved to this directory once the job is created. It has
                 no hooks configuration, so submitting it again does not run its bundle hooks.
+        dependencies (list[dict[str, str]], optional): The jobs this job waits for, sent to CreateJob as given.
+                Each item is {"jobId": "<id>"}.
 
     Returns:
         Returns the submitted job id. If `debug_snapshot_dir` is provided then no job is submitted and it returns None.
@@ -1311,6 +1315,10 @@ def create_job_from_job_bundle(
         )
     if target_task_run_status is not None:
         create_job_args["targetTaskRunStatus"] = target_task_run_status
+    if dependencies:
+        create_job_args["dependencies"] = dependencies
+        if "targetTaskRunStatus" not in create_job_args:
+            create_job_args["targetTaskRunStatus"] = "PENDING"
 
     if logging.DEBUG >= logger.getEffectiveLevel():
         logger.debug(json.dumps(create_job_args, indent=1))
