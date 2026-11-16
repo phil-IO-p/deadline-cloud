@@ -36,7 +36,8 @@ def test_cli_config_show_defaults(fresh_deadline_config):
     assert fresh_deadline_config in result.output
 
     # Assert the expected number of settings
-    assert len(settings.keys()) == 28
+    assert len(settings.keys()) == 29
+    assert config_file.get_setting_default("settings.allow_job_dependencies") == "false"
 
     for setting_name in settings.keys():
         assert setting_name in result.output
@@ -116,6 +117,7 @@ def test_cli_config_show_modified_config(fresh_deadline_config):
     config.set_setting("settings.https_proxy", "http://proxy.example.com:8080")
     config.set_setting("settings.ca_bundle", "/etc/ssl/certs/ca-bundle.pem")
     config.set_setting("settings.job_bundle_default_directory", "/my/bundles")
+    config.set_setting("settings.allow_job_dependencies", "true")
 
     runner = CliRunner()
     result = runner.invoke(main, ["config", "show"])
@@ -131,11 +133,11 @@ def test_cli_config_show_modified_config(fresh_deadline_config):
         assert "~/alternate/job_history" in result.output
     assert result.output.count("False") == 1
     assert result.output.count("True") == 1
-    # "true" appears seven times: force_s3_check value, allow_bundle_hooks value,
-    # allow_environment_hooks value, telemetry.opt_out description,
-    # force_s3_check description, allow_bundle_hooks description,
-    # allow_environment_hooks description
-    assert result.output.count("true") == 7
+    # "true" appears eight times: force_s3_check value, allow_bundle_hooks value,
+    # allow_environment_hooks value, allow_job_dependencies value,
+    # telemetry.opt_out description, force_s3_check description,
+    # allow_bundle_hooks description, allow_environment_hooks description
+    assert result.output.count("true") == 8
     assert "farm-82934h23k4j23kjh" in result.output
     assert "queue-389348u234jhk34" in result.output
     assert "job-239u40234jkl234nkl23" in result.output

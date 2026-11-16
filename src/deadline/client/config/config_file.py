@@ -8,6 +8,7 @@ __all__ = [
     "get_config_file_path",
     "get_setting",
     "get_setting_default",
+    "job_dependencies_enabled",
     "read_config",
     "set_setting",
     "str2bool",
@@ -301,6 +302,13 @@ SETTINGS: Dict[str, Dict[str, Any]] = {
     "settings.max_failed_tasks_count": {
         "default": "20",
         "description": "The default maximum number of tasks that can fail before the job is marked as failed.",
+    },
+    "settings.allow_job_dependencies": {
+        "default": "false",
+        "description": (
+            "Allow the --depends-on option of 'deadline bundle submit', which names the upstream jobs a new job waits for. "
+            "When enabled, the option is shown and accepted. Otherwise it is hidden and refused."
+        ),
     },
     "settings.https_proxy": {
         "default": "",
@@ -746,6 +754,10 @@ def get_best_profile_for_farm(farm_id: str, queue_id: Optional[str] = None) -> s
 
     # Return the first farm-matched profile, or the default if there was none
     return first_farm_aws_profile_name or default_aws_profile_name
+
+
+def job_dependencies_enabled(config: Optional[ConfigParser] = None) -> bool:
+    return str2bool(get_setting("settings.allow_job_dependencies", config=config))
 
 
 def str2bool(value: str) -> bool:

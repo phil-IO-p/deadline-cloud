@@ -11,6 +11,7 @@ from typing import Generator
 from unittest.mock import ANY, patch, call, MagicMock
 
 import boto3  # type: ignore[import]
+import click
 from click.testing import CliRunner
 import pytest
 import yaml
@@ -1573,3 +1574,148 @@ def test_bundle_gui_submit_submitter_info_file_missing_submitter_name(
 
     assert result.exit_code != 0
     assert "submitter_name is required" in result.output
+
+
+JOB_ID_A = "job-" + "a" * 32
+JOB_ID_B = "job-" + "0123456789abcdef" * 2
+
+
+def _submit_depends_on(bundle_dir, *extra_args, enabled=True):
+    config.set_setting("defaults.farm_id", MOCK_FARM_ID)
+    config.set_setting("defaults.queue_id", MOCK_QUEUE_ID)
+    if enabled:
+        config.set_setting("settings.allow_job_dependencies", "true")
+    with open(os.path.join(bundle_dir, "template.json"), "w", encoding="utf8") as f:
+        f.write(MOCK_JOB_TEMPLATE_CASES["MINIMAL_JSON"][1])
+    return CliRunner().invoke(main, ["bundle", "submit", *extra_args, bundle_dir])
+
+
+def _mock_create_job_responses(deadline_mock):
+    deadline_mock.create_job.return_value = MOCK_CREATE_JOB_RESPONSE
+    deadline_mock.get_job.return_value = MOCK_GET_JOB_RESPONSE
+
+
+def test_bundle_submit_depends_on_shown_in_help_when_enabled(fresh_deadline_config):
+    config.set_setting("settings.allow_job_dependencies", "true")
+    result = CliRunner().invoke(main, ["bundle", "submit", "--help"])
+
+    assert result.exit_code == 0
+    help_text = " ".join(result.output.split())
+    assert "--depends-on" in help_text
+    assert "Repeat the option to name more than one" in help_text
+    assert "PENDING means tasks wait until" in help_text
+
+
+def test_bundle_submit_depends_on_hidden_in_help_when_disabled(fresh_deadline_config):
+    result = CliRunner().invoke(main, ["bundle", "submit", "--help"])
+
+    assert result.exit_code == 0
+    help_text = " ".join(result.output.split())
+    assert "--depends-on" not in help_text
+    assert "PENDING means tasks wait until" in help_text
+
+
+def test_bundle_submit_depends_on_hidden_property_follows_setting(fresh_deadline_config):
+    from deadline.client.cli._groups.bundle_group import bundle_submit
+
+    option = next(p for p in bundle_submit.params if p.name == "depends_on")
+    assert isinstance(option, click.Option)
+
+    assert option.hidden is True
+    config.set_setting("settings.allow_job_dependencies", "true")
+    assert option.hidden is False
+
+
+def test_bundle_submit_depends_on_refused_when_disabled(
+    fresh_deadline_config, deadline_mock, temp_job_bundle_dir
+):
+    result = _submit_depends_on(
+        temp_job_bundle_dir, "--depends-on", JOB_ID_A, "--yes", enabled=False
+    )
+
+    assert result.exit_code == 2
+    assert "deadline config set settings.allow_job_dependencies true" in result.output
+    deadline_mock.create_job.assert_not_called()
+
+
+def test_bundle_submit_depends_on_passes_jobs_in_order(
+    fresh_deadline_config, deadline_mock, temp_job_bundle_dir
+):
+    _mock_create_job_responses(deadline_mock)
+    result = _submit_depends_on(
+        temp_job_bundle_dir, "--depends-on", JOB_ID_A, "--depends-on", JOB_ID_B, "--yes"
+    )
+
+    assert result.exit_code == 0, result.output
+    kwargs = deadline_mock.create_job.call_args.kwargs
+    assert kwargs["dependencies"] == [{"jobId": JOB_ID_A}, {"jobId": JOB_ID_B}]
+    assert kwargs["targetTaskRunStatus"] == "PENDING"
+
+
+def test_bundle_submit_depends_on_keeps_duplicates(
+    fresh_deadline_config, deadline_mock, temp_job_bundle_dir
+):
+    _mock_create_job_responses(deadline_mock)
+    result = _submit_depends_on(
+        temp_job_bundle_dir, "--depends-on", JOB_ID_A, "--depends-on", JOB_ID_A, "--yes"
+    )
+
+    assert result.exit_code == 0, result.output
+    kwargs = deadline_mock.create_job.call_args.kwargs
+    assert kwargs["dependencies"] == [{"jobId": JOB_ID_A}, {"jobId": JOB_ID_A}]
+
+
+def test_bundle_submit_depends_on_explicit_status_wins(
+    fresh_deadline_config, deadline_mock, temp_job_bundle_dir
+):
+    _mock_create_job_responses(deadline_mock)
+    result = _submit_depends_on(
+        temp_job_bundle_dir,
+        "--depends-on",
+        JOB_ID_A,
+        "--target-task-run-status",
+        "SUSPENDED",
+        "--yes",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert deadline_mock.create_job.call_args.kwargs["targetTaskRunStatus"] == "SUSPENDED"
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    ["job-abc", "JOB-" + "a" * 32, "a" * 32, "", "job-" + "g" * 32, "job-" + "a" * 33],
+)
+def test_bundle_submit_depends_on_rejects_malformed_id(
+    fresh_deadline_config, deadline_mock, temp_job_bundle_dir, bad_id
+):
+    result = _submit_depends_on(temp_job_bundle_dir, "--depends-on", bad_id, "--yes")
+
+    assert result.exit_code == 2
+    deadline_mock.create_job.assert_not_called()
+
+
+def test_bundle_submit_depends_on_absent_sends_no_dependencies(
+    fresh_deadline_config, deadline_mock, temp_job_bundle_dir
+):
+    _mock_create_job_responses(deadline_mock)
+    result = _submit_depends_on(temp_job_bundle_dir, "--yes", enabled=True)
+    assert result.exit_code == 0, result.output
+    assert "dependencies" not in deadline_mock.create_job.call_args.kwargs
+
+    deadline_mock.create_job.reset_mock()
+    result = _submit_depends_on(temp_job_bundle_dir, "--yes", enabled=False)
+    assert result.exit_code == 0, result.output
+    assert "dependencies" not in deadline_mock.create_job.call_args.kwargs
+
+
+def test_bundle_submit_target_task_run_status_accepts_pending(
+    fresh_deadline_config, deadline_mock, temp_job_bundle_dir
+):
+    _mock_create_job_responses(deadline_mock)
+    result = _submit_depends_on(
+        temp_job_bundle_dir, "--target-task-run-status", "PENDING", "--yes", enabled=False
+    )
+
+    assert result.exit_code == 0, result.output
+    assert deadline_mock.create_job.call_args.kwargs["targetTaskRunStatus"] == "PENDING"

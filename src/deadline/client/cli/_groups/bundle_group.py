@@ -181,6 +181,42 @@ def _interactive_confirmation_prompt(message: str, default_response: bool) -> bo
     )
 
 
+_JOB_ID_PATTERN = re.compile(r"^job-[0-9a-f]{32}$")
+
+
+class _DependsOnOption(click.Option):
+    """An option that is hidden from help and completion unless job dependencies are enabled."""
+
+    @property
+    def hidden(self) -> bool:
+        return not config_file.job_dependencies_enabled()
+
+    @hidden.setter
+    def hidden(self, value: bool) -> None:
+        # click.Option.__init__ assigns self.hidden; the live setting decides instead.
+        pass
+
+
+def _validate_depends_on(
+    ctx: click.Context, param: click.Parameter, value: tuple[str, ...]
+) -> tuple[str, ...]:
+    if not value:
+        return value
+    if not config_file.job_dependencies_enabled():
+        raise click.UsageError(
+            "--depends-on is not enabled. "
+            "Enable it with: deadline config set settings.allow_job_dependencies true"
+        )
+    for job_id in value:
+        if not _JOB_ID_PATTERN.match(job_id):
+            raise click.BadParameter(
+                f"{job_id!r} is not a job id. Expected job- followed by 32 hex digits.",
+                ctx=ctx,
+                param=param,
+            )
+    return value
+
+
 @cli_bundle.command(name="submit")
 @click.option(
     "-p",
@@ -225,9 +261,20 @@ def _interactive_confirmation_prompt(message: str, default_response: bool) -> bo
 )
 @click.option(
     "--target-task-run-status",
-    type=click.Choice(["READY", "SUSPENDED"], case_sensitive=False),
+    type=click.Choice(["READY", "SUSPENDED", "PENDING"], case_sensitive=False),
     help="The target task run status for the job. READY means tasks will start immediately, "
-    "SUSPENDED means tasks will be created but not start until manually resumed.",
+    "SUSPENDED means tasks will be created but not start until manually resumed. "
+    "PENDING means tasks wait until the jobs this job depends on succeed.",
+)
+@click.option(
+    "--depends-on",
+    "depends_on",
+    multiple=True,
+    cls=_DependsOnOption,
+    callback=_validate_depends_on,
+    help="The id of a job this job waits for, like job-0123456789abcdef0123456789abcdef. "
+    "Repeat the option to name more than one. "
+    "The job is created with --target-task-run-status PENDING unless you set a status.",
 )
 @click.option(
     "--job-attachments-file-system",
@@ -284,6 +331,7 @@ def bundle_submit(
     max_retries_per_task,
     max_worker_count,
     target_task_run_status,
+    depends_on,
     require_paths_exist,
     submitter_name,
     save_debug_snapshot,
@@ -355,6 +403,7 @@ def bundle_submit(
             max_retries_per_task=max_retries_per_task,
             max_worker_count=max_worker_count,
             target_task_run_status=target_task_run_status,
+            dependencies=[{"jobId": job_id} for job_id in depends_on] or None,
             hashing_progress_callback=hash_callback_manager.callback,
             upload_progress_callback=upload_callback_manager.callback,
             create_job_result_callback=_check_create_job_wait_canceled,

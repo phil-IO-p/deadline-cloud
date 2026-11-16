@@ -582,3 +582,13 @@ def test_farm_region_depends_on_farm_id(fresh_deadline_config):
     # Switching back to farm-A restores its region.
     config.set_setting("defaults.farm_id", "farm-A")
     assert config.get_setting("defaults.farm_region") == "us-west-2"
+
+
+def test_job_dependencies_enabled_defaults_to_false(fresh_deadline_config):
+    assert config_file.job_dependencies_enabled() is False
+
+
+@pytest.mark.parametrize("value,expected", [("true", True), ("false", False)])
+def test_job_dependencies_enabled_follows_setting(fresh_deadline_config, value, expected):
+    config.set_setting("settings.allow_job_dependencies", value)
+    assert config_file.job_dependencies_enabled() is expected
