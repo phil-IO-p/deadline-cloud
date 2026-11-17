@@ -195,16 +195,49 @@ class _DependsOnOption(click.Option):
         pass
 
 
+_DEPENDENCIES_DISABLED_MESSAGE = (
+    "Job dependencies are not enabled. "
+    "Enable them with: deadline config set settings.allow_job_dependencies true"
+)
+_PENDING_HELP = " PENDING means tasks wait until the jobs this job depends on succeed."
+
+
+class _TargetTaskRunStatusChoice(click.Choice):
+    @property
+    def choices(self):  # type: ignore[override]
+        if config_file.job_dependencies_enabled():
+            return self._all_choices
+        return tuple(c for c in self._all_choices if c != "PENDING")
+
+    @choices.setter
+    def choices(self, value) -> None:
+        self._all_choices = tuple(value)
+
+    def convert(self, value, param, ctx):
+        if str(value).upper() == "PENDING" and not config_file.job_dependencies_enabled():
+            raise click.UsageError(_DEPENDENCIES_DISABLED_MESSAGE, ctx=ctx)
+        return super().convert(value, param, ctx)
+
+
+class _TargetTaskRunStatusOption(click.Option):
+    @property
+    def help(self):  # type: ignore[override]
+        if config_file.job_dependencies_enabled():
+            return self._base_help + _PENDING_HELP
+        return self._base_help
+
+    @help.setter
+    def help(self, value) -> None:
+        self._base_help = value
+
+
 def _validate_depends_on(
     ctx: click.Context, param: click.Parameter, value: tuple[str, ...]
 ) -> tuple[str, ...]:
     if not value:
         return value
     if not config_file.job_dependencies_enabled():
-        raise click.UsageError(
-            "--depends-on is not enabled. "
-            "Enable it with: deadline config set settings.allow_job_dependencies true"
-        )
+        raise click.UsageError(_DEPENDENCIES_DISABLED_MESSAGE)
     for job_id in value:
         if not _JOB_ID_PATTERN.fullmatch(job_id):
             raise click.BadParameter(
@@ -259,10 +292,10 @@ def _validate_depends_on(
 )
 @click.option(
     "--target-task-run-status",
-    type=click.Choice(["READY", "SUSPENDED", "PENDING"], case_sensitive=False),
+    cls=_TargetTaskRunStatusOption,
+    type=_TargetTaskRunStatusChoice(["READY", "SUSPENDED", "PENDING"], case_sensitive=False),
     help="The target task run status for the job. READY means tasks will start immediately, "
-    "SUSPENDED means tasks will be created but not start until manually resumed. "
-    "PENDING means tasks wait until the jobs this job depends on succeed.",
+    "SUSPENDED means tasks will be created but not start until manually resumed.",
 )
 @click.option(
     "--depends-on",

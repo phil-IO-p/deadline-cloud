@@ -1611,7 +1611,7 @@ def test_bundle_submit_depends_on_hidden_in_help_when_disabled(fresh_deadline_co
     assert result.exit_code == 0
     help_text = " ".join(result.output.split())
     assert "--depends-on" not in help_text
-    assert "PENDING means tasks wait until" in help_text
+    assert "PENDING" not in help_text
 
 
 def test_bundle_submit_depends_on_hidden_property_follows_setting(fresh_deadline_config):
@@ -1730,13 +1730,50 @@ def test_bundle_submit_depends_on_absent_sends_no_dependencies(
     assert "dependencies" not in deadline_mock.create_job.call_args.kwargs
 
 
-def test_bundle_submit_target_task_run_status_accepts_pending(
+def test_bundle_submit_target_task_run_status_accepts_pending_when_enabled(
     fresh_deadline_config, deadline_mock, temp_job_bundle_dir
 ):
     _mock_create_job_responses(deadline_mock)
     result = _submit_depends_on(
-        temp_job_bundle_dir, "--target-task-run-status", "PENDING", "--yes", enabled=False
+        temp_job_bundle_dir, "--target-task-run-status", "PENDING", "--yes", enabled=True
     )
 
     assert result.exit_code == 0, result.output
     assert deadline_mock.create_job.call_args.kwargs["targetTaskRunStatus"] == "PENDING"
+
+
+@pytest.mark.parametrize("status", ["PENDING", "pending"])
+def test_bundle_submit_target_task_run_status_refuses_pending_when_disabled(
+    fresh_deadline_config, deadline_mock, temp_job_bundle_dir, status
+):
+    result = _submit_depends_on(
+        temp_job_bundle_dir, "--target-task-run-status", status, "--yes", enabled=False
+    )
+
+    assert result.exit_code == 2
+    assert "deadline config set settings.allow_job_dependencies true" in result.output
+    deadline_mock.create_job.assert_not_called()
+
+
+def test_bundle_submit_target_task_run_status_choices_follow_setting(fresh_deadline_config):
+    from deadline.client.cli._groups.bundle_group import bundle_submit
+
+    option = next(p for p in bundle_submit.params if p.name == "target_task_run_status")
+    assert isinstance(option.type, click.Choice)
+
+    assert "PENDING" not in option.type.choices
+    config.set_setting("settings.allow_job_dependencies", "true")
+    assert "PENDING" in option.type.choices
+
+
+@pytest.mark.parametrize("status", ["READY", "SUSPENDED"])
+def test_bundle_submit_target_task_run_status_other_choices_unaffected(
+    fresh_deadline_config, deadline_mock, temp_job_bundle_dir, status
+):
+    _mock_create_job_responses(deadline_mock)
+    result = _submit_depends_on(
+        temp_job_bundle_dir, "--target-task-run-status", status, "--yes", enabled=False
+    )
+
+    assert result.exit_code == 0, result.output
+    assert deadline_mock.create_job.call_args.kwargs["targetTaskRunStatus"] == status
