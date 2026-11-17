@@ -181,12 +181,10 @@ def _interactive_confirmation_prompt(message: str, default_response: bool) -> bo
     )
 
 
-_JOB_ID_PATTERN = re.compile(r"^job-[0-9a-f]{32}$")
+_JOB_ID_PATTERN = re.compile(r"job-[0-9a-f]{32}")
 
 
 class _DependsOnOption(click.Option):
-    """An option that is hidden from help and completion unless job dependencies are enabled."""
-
     @property
     def hidden(self) -> bool:
         return not config_file.job_dependencies_enabled()
@@ -208,7 +206,7 @@ def _validate_depends_on(
             "Enable it with: deadline config set settings.allow_job_dependencies true"
         )
     for job_id in value:
-        if not _JOB_ID_PATTERN.match(job_id):
+        if not _JOB_ID_PATTERN.fullmatch(job_id):
             raise click.BadParameter(
                 f"{job_id!r} is not a job id. Expected job- followed by 32 hex digits.",
                 ctx=ctx,

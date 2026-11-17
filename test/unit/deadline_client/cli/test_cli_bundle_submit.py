@@ -1583,8 +1583,7 @@ JOB_ID_B = "job-" + "0123456789abcdef" * 2
 def _submit_depends_on(bundle_dir, *extra_args, enabled=True):
     config.set_setting("defaults.farm_id", MOCK_FARM_ID)
     config.set_setting("defaults.queue_id", MOCK_QUEUE_ID)
-    if enabled:
-        config.set_setting("settings.allow_job_dependencies", "true")
+    config.set_setting("settings.allow_job_dependencies", "true" if enabled else "false")
     with open(os.path.join(bundle_dir, "template.json"), "w", encoding="utf8") as f:
         f.write(MOCK_JOB_TEMPLATE_CASES["MINIMAL_JSON"][1])
     return CliRunner().invoke(main, ["bundle", "submit", *extra_args, bundle_dir])
@@ -1684,7 +1683,15 @@ def test_bundle_submit_depends_on_explicit_status_wins(
 
 @pytest.mark.parametrize(
     "bad_id",
-    ["job-abc", "JOB-" + "a" * 32, "a" * 32, "", "job-" + "g" * 32, "job-" + "a" * 33],
+    [
+        "job-abc",
+        "JOB-" + "a" * 32,
+        "a" * 32,
+        "",
+        "job-" + "g" * 32,
+        "job-" + "a" * 33,
+        "job-" + "a" * 32 + "\n",
+    ],
 )
 def test_bundle_submit_depends_on_rejects_malformed_id(
     fresh_deadline_config, deadline_mock, temp_job_bundle_dir, bad_id
@@ -1692,6 +1699,20 @@ def test_bundle_submit_depends_on_rejects_malformed_id(
     result = _submit_depends_on(temp_job_bundle_dir, "--depends-on", bad_id, "--yes")
 
     assert result.exit_code == 2
+    assert "is not a job id" in result.output
+    deadline_mock.create_job.assert_not_called()
+
+
+def test_bundle_submit_depends_on_disabled_refusal_comes_before_id_check(
+    fresh_deadline_config, deadline_mock, temp_job_bundle_dir
+):
+    result = _submit_depends_on(
+        temp_job_bundle_dir, "--depends-on", "job-abc", "--yes", enabled=False
+    )
+
+    assert result.exit_code == 2
+    assert "deadline config set settings.allow_job_dependencies true" in result.output
+    assert "is not a job id" not in result.output
     deadline_mock.create_job.assert_not_called()
 
 
